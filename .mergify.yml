@@ -43,7 +43,11 @@ pull_request_rules:
       # Mergify write a merge commit into a branch they cannot push to.
       - or:
           - author=mark-brannan
-          - author=dependabot[bot]
+          # Every bot here is a GitHub App the owner installed -- dependabot,
+          # and each repository's own release-please app, whose login is
+          # named after the repository -- so a bot author is trusted by
+          # construction rather than by listing.
+          - author~=\[bot\]$
           # A fork's head branch is outside this repository.
           - from-fork
     actions:
