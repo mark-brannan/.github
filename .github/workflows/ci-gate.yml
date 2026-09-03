@@ -1,0 +1,62 @@
+name: ci-gate
+
+# The single required status check, shared by every repository. Each CI
+# workflow fans its jobs into one calling job:
+#
+#     ci-gate:
+#       needs: [test, build]
+#       if: always()
+#       permissions: {}
+#       uses: mark-brannan/.github/.github/workflows/ci-gate.yml@main
+#       with:
+#         results: ${{ toJSON(needs) }}
+#
+# so the ruleset requires one context -- `ci-gate / gate` -- and adding or
+# renaming a job changes nothing it is required to know. Every result in
+# `needs` has to be `success` (or `skipped`, only when `allow-skipped` says
+# so: a repo whose jobs deliberately skip a board-only pull request); an
+# empty `needs` fails, because a gate that gates nothing is not a gate.
+#
+# The caller's `always()` is what lets the gate evaluate when a dependency
+# failed or was skipped, so it reports an explicit pass or fail of its own.
+# Without it the gate would inherit the skip, and a skipped required check is
+# not a dependable block: a job skipped by `if` reports `skipped`, while a
+# whole workflow skipped by path or branch filters leaves the check pending
+# forever. Neither is the verdict a ruleset needs.
+
+on:
+  workflow_call:
+    inputs:
+      results:
+        description: "`toJSON(needs)` from the calling job"
+        required: true
+        type: string
+      allow-skipped:
+        description: Treat a skipped dependency as green
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  gate:
+    # It reads nothing and writes nothing; the results arrive as an input.
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULTS: ${{ inputs.results }}
+          ALLOW_SKIPPED: ${{ inputs.allow-skipped }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$RESULTS"
+          if [ "$(jq 'length' <<<"$RESULTS")" -eq 0 ]; then
+            echo "::error::ci-gate has no dependencies; nothing was tested"
+            exit 1
+          fi
+          ok='["success"]'
+          [ "$ALLOW_SKIPPED" = true ] && ok='["success","skipped"]'
+          bad=$(jq -r --argjson ok "$ok" \
+            '[to_entries[] | select([.value.result] | inside($ok) | not) | .key] | join(" ")' <<<"$RESULTS")
+          if [ -n "$bad" ]; then
+            echo "::error::not green: $bad"
+            exit 1
+          fi

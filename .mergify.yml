@@ -1,0 +1,60 @@
+# The Mergify configuration every repository under this account shares. A
+# repository opts in with a one-line `.mergify.yml`:
+#
+#     extends: .github
+#
+# and overrides a rule by restating it under the same name. Mergify does three
+# things here, and none of them needs a comment or a click.
+#
+# 1. It keeps open pull requests up to date with main. The branch ruleset
+#    requires branches to be up to date before merging, so without this every
+#    merge to main leaves the rest of the open pull requests stale.
+# 2. It merges dependabot's updates once the gate is green. Dependabot is the
+#    volume, and the part nobody is really reviewing.
+# 3. It offers the merge queue for anything else, on request: `@mergifyio queue`.
+#
+# Human pull requests are deliberately NOT auto-merged. The ruleset requires no
+# approvals, so an automatic trigger would land work in progress the moment CI
+# went green.
+#
+# The check is `ci-gate / gate`: the `gate` job of the reusable ci-gate
+# workflow in this repository, called from a job named `ci-gate`. GitHub names
+# a reusable workflow's checks "<caller job> / <called job>", so that is the
+# one context the rulesets require and the one this file waits on.
+queue_rules:
+  - name: default
+    merge_method: squash
+    # Explicit rather than inherited: without this Mergify falls back to the
+    # branch's required checks, and would merge on a repo that gates nothing.
+    queue_conditions:
+      - check-success=ci-gate / gate
+
+pull_request_rules:
+  - name: Update pull requests that have fallen behind main
+    conditions:
+      - base=main
+      - -draft
+      - -conflict
+      - -closed
+      - '#commits-behind>0'
+      # Automatic rules are not covered by commands_restrictions, and anyone
+      # with read access can open a pull request off an existing branch of a
+      # public repo. Without this, that stranger's pull request would have
+      # Mergify write a merge commit into a branch they cannot push to.
+      - or:
+          - author=mark-brannan
+          - author=dependabot[bot]
+          # A fork's head branch is outside this repository.
+          - from-fork
+    actions:
+      update: {}
+
+  - name: Merge dependabot updates once the gate is green
+    conditions:
+      - base=main
+      - -draft
+      - -conflict
+      - author=dependabot[bot]
+    actions:
+      queue:
+        name: default

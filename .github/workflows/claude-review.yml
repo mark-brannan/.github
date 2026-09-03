@@ -1,0 +1,217 @@
+name: Claude PR Review
+
+# An independent reviewer for every pull request, shared by every repository:
+# a fresh Claude with no shared context with whichever session wrote the
+# change. Advisory only -- it posts findings, it does not block the merge, and
+# no ruleset requires it. A model's opinion should not be able to stop a
+# merge, and a required check that depends on a token would fail closed the
+# day the token expires.
+#
+# A repository calls it from a workflow of its own:
+#
+#     on:
+#       pull_request:
+#         types: [opened, synchronize, ready_for_review]
+#     permissions:
+#       contents: read
+#       pull-requests: write
+#       issues: read
+#       id-token: write
+#     jobs:
+#       review:
+#         uses: mark-brannan/.github/.github/workflows/claude-review.yml@main
+#         secrets:
+#           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+#
+# and tailors it through the inputs below: its own `prompt` where the generic
+# one is not enough, extra `allowed-tools`, an `allowed-bots` entry for a
+# release bot that opens pull requests, a `node-version` to review against.
+#
+# A run costs real tokens, so it only happens when the pull request's
+# content has changed. `synchronize` also fires on every rebase -- and
+# Mergify keeps open pull requests up to date with main, so that is no
+# longer rare. The gate below hashes the raw tree diff (paths, modes, blob
+# ids) between the merge base and HEAD -- not `git patch-id`, which ignores
+# whitespace inside changed lines -- and remembers each fingerprint it has
+# reviewed in the Actions cache; a matching fingerprint skips the review. A
+# fingerprint is recorded only once a review comment from the bot is actually
+# on the pull request, because the action exits green even when it posted
+# nothing. The cache is the store rather than a marker in the comment because
+# it does not depend on the model remembering to print anything. An evicted
+# entry costs one extra review, never a missed one. The cache is the calling
+# repository's, so fingerprints never cross repositories.
+# Ported from mark-brannan/symphony 66bdddc.
+#
+# Auth: needs the CLAUDE_CODE_OAUTH_TOKEN secret in the calling repository
+# (mint one with `claude setup-token`, then `gh secret set
+# CLAUDE_CODE_OAUTH_TOKEN`). Until that secret exists the review step skips
+# with a warning rather than failing every pull request in the repository.
+
+on:
+  workflow_call:
+    inputs:
+      prompt:
+        description: The review brief; the repository and PR number are prepended
+        required: false
+        type: string
+        default: |
+          You are the independent reviewer for this repository. The pull
+          request was most likely written by another Claude session; your
+          job is a genuine second opinion, not a courtesy rubber-stamp and
+          not a merge gate (this check is advisory, not required). You
+          share no context with the author -- everything you assert must
+          come from the repository, the diff, or something you ran
+          yourself. Flag what is actually wrong; do not invent caution to
+          sound thorough, and say plainly when you found nothing.
+
+          Read CLAUDE.md and AGENTS.md in full first if they exist. They
+          are the conventions this repository is held to, and a change
+          that breaks one of them is a finding even when the code works.
+
+          No credential, token, key, or password-looking string may land
+          in the diff, including in docs and examples. If something even
+          resembles a live credential, say so as a blocking finding and do
+          not quote the value back in your comment.
+
+          Verify rather than hand-trace: `npm ci` then `npm test`, and
+          `npm run build` where the repository has one. "Verified" must
+          mean executed. Say what you ran, including when it passed.
+
+          Post findings as inline comments via
+          mcp__github_inline_comment__create_inline_comment (with
+          `confirmed: true`) anchored to the lines they concern, and one
+          top-level summary via `gh pr comment`. In the summary, list what
+          you checked and what you ran, even when everything passed. Do
+          not push commits or edit files; you review, the author fixes.
+      allowed-tools:
+        description: The --allowedTools list handed to the CLI
+        required: false
+        type: string
+        default: mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(npm ci),Bash(npm test),Bash(npm run build:*)
+      allowed-bots:
+        description: Bot logins whose pull requests are reviewed anyway (the action refuses non-human actors by default)
+        required: false
+        type: string
+        default: ''
+      node-version:
+        description: Node version to set up before the review; empty leaves the runner's
+        required: false
+        type: string
+        default: ''
+      timeout-minutes:
+        description: Wall clock cap on the job; the runaway backstop, not a target
+        required: false
+        type: number
+        default: 20
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: false
+
+jobs:
+  review:
+    # Skip drafts, and skip fork pull requests -- forks cannot read the
+    # secret, so a run there only produces a red X that means nothing.
+    if: >-
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    # No --max-turns, deliberately: it produced false reds and no true ones,
+    # failing a run after the review had already been posted. Wall clock is
+    # the resource worth bounding, and it cannot discard work that landed.
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # Queue rather than cancel: a cancelled review has already spent its
+    # tokens and never records its fingerprint, so the replacement run would
+    # spend them again. The common trigger here is a Mergify update, which
+    # queues behind the running review and then skips on the fingerprint.
+    concurrency:
+      group: claude-review-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - if: inputs.node-version != ''
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Fingerprint the PR's content
+        id: fp
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch -q origin "$BASE"
+          raw=$(git diff-tree -r --no-commit-id "$(git merge-base "origin/$BASE" HEAD)" HEAD)
+          if [ -n "$raw" ]; then id=$(printf '%s\n' "$raw" | sha256sum | cut -d' ' -f1); else id=empty; fi
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if this content was already reviewed
+        id: seen
+        uses: actions/cache/restore@v4
+        with:
+          path: .claude-reviewed
+          key: claude-review-pr${{ github.event.pull_request.number }}-${{ steps.fp.outputs.id }}
+          lookup-only: true
+
+      # Without this the action fails on every pull request in a repository
+      # where the secret has not been set yet, which reads as a broken build
+      # rather than a missing credential.
+      - name: Check the review token is configured
+        id: tok
+        env:
+          TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::CLAUDE_CODE_OAUTH_TOKEN is not set; skipping the review"
+          fi
+
+      - if: steps.seen.outputs.cache-hit != 'true' && steps.tok.outputs.present == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          track_progress: true
+          allowed_bots: ${{ inputs.allowed-bots }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            ${{ inputs.prompt }}
+          # Comments cannot go inside claude_args; the action passes that
+          # block through to the CLI verbatim.
+          claude_args: |
+            --allowedTools "${{ inputs.allowed-tools }}"
+
+      - if: steps.seen.outputs.cache-hit != 'true' && steps.tok.outputs.present == 'true'
+        name: Confirm a review comment actually landed
+        id: posted
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          SINCE: ${{ steps.fp.outputs.since }}
+        run: |
+          n=$(gh api "repos/${{ github.repository }}/issues/$PR/comments" --paginate \
+                --jq "[.[] | select(.user.login == \"claude[bot]\" and .created_at >= \"$SINCE\")] | length")
+          echo "posted=$([ "$n" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          [ "$n" -gt 0 ] || echo "::warning::no review comment posted; fingerprint not recorded"
+
+      - if: steps.seen.outputs.cache-hit != 'true' && steps.posted.outputs.posted == 'true'
+        name: Remember that this content was reviewed
+        run: echo "${{ steps.fp.outputs.id }}" > .claude-reviewed
+
+      - if: steps.seen.outputs.cache-hit != 'true' && steps.posted.outputs.posted == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .claude-reviewed
+          key: claude-review-pr${{ github.event.pull_request.number }}-${{ steps.fp.outputs.id }}
