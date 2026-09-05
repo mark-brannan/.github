@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # docker/{gitleaks,trufflehog}/Dockerfile are never built -- each is a
+  # single FROM line, read at runtime by secret-scan.yml, so Dependabot has
+  # a real manifest to bump instead of a version string embedded in YAML
+  # it can't see. Same pattern as mark-brannan/symphony's
+  # docker/gitleaks/Dockerfile and docker/trufflehog/Dockerfile.
+  - package-ecosystem: docker
+    directory: /docker/gitleaks
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /docker/trufflehog
+    schedule:
+      interval: weekly
+
+  # Actions used by this repo's own reusable workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
