@@ -25,11 +25,14 @@ name: Claude PR Review
 #
 # and tailors it through the inputs below: its own `prompt` where the generic
 # one is not enough, extra `allowed-tools`, a `node-version` to review
-# against. `allowed-bots` defaults to `mergify[bot]` -- every repo here uses
-# Mergify to re-run checks at merge time, and claude-code-action refuses
-# non-human actors by default, so that bot needs allowing everywhere. A repo
-# with its own bot too (a release-please app, say) overrides the input with
-# both: `allowed-bots: mergify[bot],its-own-bot-login`.
+# against. `allowed-bots` defaults to `mergify[bot],mark-brannan-release-please[bot]`
+# -- claude-code-action refuses non-human actors by default, and those two
+# are the shared org-wide bots: Mergify re-runs checks on every repo, and the
+# shared release-please app opens the release PR wherever it's installed. A
+# repo not using one is unaffected -- the bot just never shows up as an
+# actor there. A repo with a genuinely different bot of its own (an older,
+# repo-specific release-please app, say) overrides the input with all three:
+# `allowed-bots: mergify[bot],mark-brannan-release-please[bot],its-own-bot-login`.
 #
 # A run costs real tokens, so it only happens when the pull request's
 # content has changed. `synchronize` also fires on every rebase -- and
@@ -93,10 +96,10 @@ on:
         type: string
         default: mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(npm ci),Bash(npm test),Bash(npm run build:*)
       allowed-bots:
-        description: Bot logins whose pull requests are reviewed anyway (the action refuses non-human actors by default). Overriding replaces this default, so include mergify[bot] in the override too.
+        description: Bot logins whose pull requests are reviewed anyway (the action refuses non-human actors by default). Overriding replaces this default, so include mergify[bot] and mark-brannan-release-please[bot] in the override too.
         required: false
         type: string
-        default: 'mergify[bot]'
+        default: 'mergify[bot],mark-brannan-release-please[bot]'
       node-version:
         description: Node version to set up before the review; empty leaves the runner's
         required: false
