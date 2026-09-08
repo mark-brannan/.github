@@ -1,0 +1,123 @@
+name: prose-budget
+
+# Shared by every repository: one deterministic guard against agents
+# degrading documentation -- line budgets, section word caps, net-prose
+# delta, JSON prose caps, narration and voice patterns, land-alone rules.
+# The engine is `prose-budget` in mark-brannan/dotfiles (.local/bin, single
+# Python 3 file, stdlib only); this workflow only fetches it and runs it, so
+# the rules and their tests live in one place and every consumer picks up a
+# fix at its next run. Configuration is the only thing that varies per
+# repository: `docs/budgets.json` or `.prose-budgets.json`, which the engine
+# discovers on its own unless `config` points elsewhere.
+#
+# Same mechanism as secret-scan.yml: the first checkout is the CALLER's repo
+# (workflow_call runs in the caller's context), the second pulls just the
+# engine file from dotfiles into `.prose-budget-engine/`. That directory is
+# never a target: the engine reads only the files the config lists, and the
+# path is dot-prefixed so no default glob picks it up. `dotfiles-ref` exists
+# so a consumer can point at an engine branch before it lands on main.
+#
+# On a pull_request event the engine runs with `--base <base sha>`, so the
+# change rules (`delta`, `land_alone`, diff-scoped `voice`) judge
+# base...HEAD. On any other event (push, workflow_dispatch) there is no base
+# to diff against, so it falls back to `--tree` and only the tree-state rules
+# run. Gate pull requests with this; a push run is a smoke check, not the gate.
+#
+# No setup-python: python3 ships on every GitHub-hosted runner, and a step
+# below prints the version so a runner image change shows up in the log.
+#
+#     jobs:
+#       prose-budget:
+#         uses: mark-brannan/.github/.github/workflows/prose-budget.yml@main
+#       ci-gate:
+#         needs: [test, prose-budget]
+#         if: always()
+#         permissions: {}
+#         uses: mark-brannan/.github/.github/workflows/ci-gate.yml@main
+#         with:
+#           results: ${{ toJSON(needs) }}
+
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: Path to the budgets config, relative to the repo root; empty lets the engine discover docs/budgets.json or .prose-budgets.json
+        required: false
+        type: string
+        default: ''
+      dotfiles-ref:
+        description: Ref of mark-brannan/dotfiles to fetch the engine from; point at a branch to test an engine change early
+        required: false
+        type: string
+        default: main
+      require-config:
+        description: Fail when no config is found (passes --require-config); off, a repo with no config passes silently
+        required: false
+        type: boolean
+        default: true
+      warn-only:
+        description: Report findings without failing the job (passes --warn-only)
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  prose-budget:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # The checkout above is the CALLER's repo -- it doesn't have the
+      # engine. Pull just that one file from dotfiles.
+      - uses: actions/checkout@v7
+        with:
+          repository: mark-brannan/dotfiles
+          ref: ${{ inputs.dotfiles-ref }}
+          sparse-checkout: /.local/bin/prose-budget
+          sparse-checkout-cone-mode: false
+          path: .prose-budget-engine
+          persist-credentials: false
+      - name: python3 version
+        run: python3 --version
+      - name: prose-budget
+        env:
+          CONFIG: ${{ inputs.config }}
+          REQUIRE_CONFIG: ${{ inputs.require-config }}
+          WARN_ONLY: ${{ inputs.warn-only }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          DOTFILES_REF: ${{ inputs.dotfiles-ref }}
+        run: |
+          set -uo pipefail
+          engine=.prose-budget-engine/.local/bin/prose-budget
+          if [ ! -f "$engine" ]; then
+            echo "::error::engine not found at $engine (dotfiles ref: $DOTFILES_REF)"
+            exit 1
+          fi
+          args=()
+          if [ -n "$CONFIG" ]; then args+=(--config "$CONFIG"); fi
+          if [ "$REQUIRE_CONFIG" = true ]; then args+=(--require-config); fi
+          if [ "$WARN_ONLY" = true ]; then args+=(--warn-only); fi
+          if [ -n "$BASE" ]; then
+            args+=(--base "$BASE")
+          else
+            echo "::notice::not a pull_request event; running tree rules only (--tree)"
+            args+=(--tree)
+          fi
+          report="$(mktemp)"
+          trap 'rm -f "$report"' EXIT
+          python3 "$engine" "${args[@]}" 2>&1 | tee "$report"
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            {
+              echo "## prose-budget: findings (exit $status)"
+              echo
+              echo '```'
+              cat "$report"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
