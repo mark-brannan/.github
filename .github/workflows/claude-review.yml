@@ -184,8 +184,16 @@ jobs:
             echo "::warning::CLAUDE_CODE_OAUTH_TOKEN is not set; skipping the review"
           fi
 
+      # Pinned off v1.0.218's Claude Code 2.1.265 install: on a cold Actions
+      # cache the native installer's launcher step fails silently -- exits 0,
+      # prints "successfully installed", but its own setup notes say
+      # "~/.local/bin does not exist" and no `claude` binary lands, so the
+      # action later dies with executable_not_found. A cache hit on the
+      # runner (leftover from a previous job) can mask it, which is why this
+      # was intermittent rather than always-red.
+      # https://github.com/anthropics/claude-code-action/issues/1817
       - if: steps.seen.outputs.cache-hit != 'true' && steps.tok.outputs.present == 'true'
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@9c5ddab2e6d17b83ea679153b31f1d5f023cf636 # v1.0.217
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
