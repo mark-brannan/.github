@@ -21,12 +21,30 @@
 # workflow in this repository, called from a job named `ci-gate`. GitHub names
 # a reusable workflow's checks "<caller job> / <called job>", so that is the
 # one context the rulesets require and the one this file waits on.
+# The branch rulesets require branches to be up to date before merging
+# (`strict_required_status_checks_policy`), and that is incompatible with a
+# batching, two-step queue: Mergify refuses the whole ruleset and every queued
+# pull request stalls with "Configuration not compatible". The compatible shape
+# is in-place checks -- one pull request checked at a time, against real main,
+# with nothing to re-check on the way out. Merges serialize, which at this
+# account's volume costs nothing, and the up-to-date guarantee stays.
+merge_queue:
+  max_parallel_checks: 1
+
 queue_rules:
   - name: default
     merge_method: squash
+    # One at a time: a batch is checked as a speculative merge commit, which is
+    # the thing the strict policy rejects.
+    batch_size: 1
     # Explicit rather than inherited: without this Mergify falls back to the
     # branch's required checks, and would merge on a repo that gates nothing.
     queue_conditions:
+      - check-success=ci-gate / gate
+    # Identical to queue_conditions on purpose. Any difference makes this a
+    # two-step queue -- checked once to enter, again to leave -- which is the
+    # other half of the incompatibility.
+    merge_conditions:
       - check-success=ci-gate / gate
 
 pull_request_rules:
