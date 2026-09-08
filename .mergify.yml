@@ -80,3 +80,22 @@ pull_request_rules:
     actions:
       queue:
         name: default
+
+  - name: Label a pull request ready for Mark when it is green and every review thread is resolved
+    # "Mark's turn" as a label GitHub search can filter on, so his queue is one
+    # bookmark: github.com/pulls?q=is:open+user:mark-brannan+label:ready-for-mark
+    # Toggle, not add: a push that turns the gate red or a bot that opens a
+    # thread takes the label off again, so it never says something stale.
+    # Dependabot is left out because the rule above merges it unasked.
+    conditions:
+      - base=main
+      - -draft
+      - -conflict
+      - -closed
+      - -author=dependabot[bot]
+      - check-success=ci-gate / gate
+      - "#review-threads-unresolved=0"
+    actions:
+      label:
+        toggle:
+          - ready-for-mark
