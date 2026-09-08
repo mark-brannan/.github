@@ -1,0 +1,26 @@
+name: npm-test-prose-fallback
+description: >
+  Runs `npm test` with PROSE_BUDGET_ALLOW_MISSING_ENGINE=1 set, for a CI job
+  that has no prose-budget engine on the runner. This does NOT relax the
+  prose budgets themselves -- it only lets a repo's local wrapper test
+  (test/docs.test.ts or .mjs, which shells out to the engine) skip loudly
+  instead of failing on a missing binary. The real gate is the separate
+  prose-budget job (prose-budget.yml, reusable in this repo), which fetches
+  the engine and runs it for real; pair this action with that job, never use
+  it alone. A job that fetches the real engine and points $PROSE_BUDGET at
+  it (see colregs' publish.yml) doesn't need this action at all.
+
+inputs:
+  working-directory:
+    description: Directory to run `npm test` in, relative to the repo root
+    required: false
+    default: '.'
+
+runs:
+  using: composite
+  steps:
+    - run: npm test
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        PROSE_BUDGET_ALLOW_MISSING_ENGINE: '1'
