@@ -9,7 +9,7 @@ workflows; the substance lives here, once.
 | `.mergify.yml` | `extends: .github` in the repository's `.mergify.yml` |
 | `.github/workflows/ci-gate.yml` | `uses: mark-brannan/.github/.github/workflows/ci-gate.yml@main` from a job named `ci-gate` |
 | `.github/workflows/claude-review.yml` | `uses: mark-brannan/.github/.github/workflows/claude-review.yml@main` |
-| `.github/workflows/prose-budget.yml` | `uses: mark-brannan/.github/.github/workflows/prose-budget.yml@v1`; the engine is `prose-budget` in `mark-brannan/dotfiles`, the config is the repository's `docs/budgets.json` or `.prose-budgets.json` |
+| `.github/workflows/prose-budget.yml` | `uses: mark-brannan/.github/.github/workflows/prose-budget.yml@main`; the engine is `prose-budget` in `mark-brannan/dotfiles`, the config is the repository's `docs/budgets.json` or `.prose-budgets.json` |
 | `.github/actions/npm-test-prose-fallback` | `uses: mark-brannan/.github/.github/actions/npm-test-prose-fallback@main` from an `npm test` step, on a runner with no `prose-budget` engine; pair with the `prose-budget` job above, which is the real gate |
 
 Each file's header comment shows the calling snippet. A documentation gate
@@ -18,7 +18,7 @@ fans into `ci-gate` like any other job:
 ```yaml
 jobs:
   prose-budget:
-    uses: mark-brannan/.github/.github/workflows/prose-budget.yml@v1
+    uses: mark-brannan/.github/.github/workflows/prose-budget.yml@main
   ci-gate:
     needs: [test, prose-budget]
     if: always()
@@ -32,15 +32,19 @@ The required status
 check everywhere is `ci-gate / gate`, and the branch rulesets are applied
 through the API, not stored here.
 
-`prose-budget` is the one entry above that is versioned, because it reaches
-outside this repository: it fetches its engine from `mark-brannan/dotfiles`,
-so tracking `main` on both would let a commit to a personal dotfiles
-repository turn every consumer red at once. The tag `v1` here is moved
-deliberately, and the workflow it points at names an immutable
-`prose-budget/vX.Y.Z` tag in dotfiles. Consumers pin `v1` and name no engine
-version; promotion and rollback are each one moved tag. The procedure is
-`Cut and promote a prose-budget engine version` in that repository's
-`RUNBOOK.md`.
+**Nothing here is ever pinned — every `uses:` line stays on `@main`,
+deliberately, permanently, at every hop.** This was tried once for
+`prose-budget`, two hops deep: consumers pinned this repository's `@v1`, and
+`prose-budget.yml` in turn pinned an immutable `mark-brannan/dotfiles` tag
+for its engine, because that one workflow reaches outside this repository for
+its logic. Both hops were reverted (mark-brannan/colregs#78,
+mark-brannan/colregs-engine#54, mark-brannan/symphony#66); `dotfiles-ref`
+in `prose-budget.yml` now defaults to `main` like everything else.
+mark-brannan/.github#18 closed on the ruling. A moving pin per consumer,
+remembered and rebumped, cost more than the risk it guarded against ever
+materialized. A fix or a break in any workflow here — or in the dotfiles
+engine it fetches — reaches every consumer on its next run; that propagation
+is the point of this repository existing, not reviewed promotion.
 
 Nothing under `profile/` and no community health files, deliberately: this
 repository's name gives it account-wide defaults, and the only things meant

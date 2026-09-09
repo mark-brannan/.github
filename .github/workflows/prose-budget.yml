@@ -16,15 +16,15 @@ name: prose-budget
 # never a target: the engine reads only the files the config lists, and the
 # path is dot-prefixed so no default glob picks it up.
 #
-# `dotfiles-ref` defaults to an IMMUTABLE dotfiles tag, not `main`, and this
-# file is the only place an engine version is written down. Consumers pin
-# `prose-budget.yml@v1` -- a tag on this repository that is moved
-# deliberately -- so pinning `v1` pins the engine too, and a commit to
-# dotfiles `main` reaches nobody. Consumers name no engine version, because a
-# pin living in three repositories at once is the outage this replaces.
-# Promoting a new engine is: tag dotfiles, bump the default below, move `v1`.
-# Rolling back is: move `v1` to the previous commit. A consumer may still
-# override `dotfiles-ref` to try an engine branch before it lands.
+# `dotfiles-ref` defaults to `main`, same as every other workflow in this
+# repository, same as every consumer's `uses:` line below. No pinning,
+# anywhere, ever -- tried once (an immutable dotfiles engine tag, a moving
+# `v1` tag on this repository consumers pinned to), reverted
+# (mark-brannan/colregs#78, mark-brannan/colregs-engine#54,
+# mark-brannan/symphony#66; mark-brannan/.github#18 closed on the ruling).
+# A fix or a break in the engine on dotfiles `main` reaches every consumer at
+# its next run; that propagation is the point. A consumer may still override
+# `dotfiles-ref` to try an engine branch before it lands.
 #
 # On a pull_request event the engine runs with `--base <base sha>`, so the
 # change rules (`delta`, `land_alone`, diff-scoped `voice`) judge
@@ -55,10 +55,10 @@ on:
         type: string
         default: ''
       dotfiles-ref:
-        description: Ref of mark-brannan/dotfiles to fetch the engine from; defaults to the pinned engine tag, override to test an engine branch early
+        description: Ref of mark-brannan/dotfiles to fetch the engine from; defaults to main, override to test an engine branch early
         required: false
         type: string
-        default: prose-budget/v1.0.0
+        default: main
       require-config:
         description: Fail when no config is found (passes --require-config); off, a repo with no config passes silently
         required: false
