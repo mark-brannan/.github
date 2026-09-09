@@ -46,6 +46,15 @@ materialized. A fix or a break in any workflow here — or in the dotfiles
 engine it fetches — reaches every consumer on its next run; that propagation
 is the point of this repository existing, not reviewed promotion.
 
-Nothing under `profile/` and no community health files, deliberately: this
-repository's name gives it account-wide defaults, and the only things meant
-to apply account-wide are the ones above.
+Nothing under `profile/`, deliberately: this repository's name gives it
+account-wide defaults, and a profile page isn't one of the things meant to
+apply account-wide.
+
+`SECURITY.md`, `CODE_OF_CONDUCT.md`, `SUPPORT.md` and `CONTRIBUTING.md` at
+the root here *are* account-wide defaults, using
+[GitHub's community-health-file fallback](https://docs.github.com/en/communities/setting-up-your-project-for-healthy-contributions/creating-a-default-community-health-file-for-your-organization):
+any repository under this account that doesn't define its own copy of one
+of these files shows this one instead. They're deliberately generic — a
+repository with real repo-specific policy (a different reporting channel,
+contributor instructions tied to its own build or data format) keeps its
+own file as an override instead of relying on the fallback.
