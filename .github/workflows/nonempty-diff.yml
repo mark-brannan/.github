@@ -1,0 +1,43 @@
+name: nonempty-diff
+
+# A pull request whose tree is identical to its base merges cleanly and
+# changes nothing. That is how mark-brannan/dotfiles#198 "landed" a fix for
+# dotfiles#196: a stray Stop-commit had reverted the branch to main's
+# content, the squash was empty, and the issue was closed as done. Nothing
+# in the pipeline read the merged tree against the PR's intent. This check
+# is the cheap half of that: it cannot know the intent, but it can refuse
+# to call an empty PR green.
+#
+# Reusable so every caller shares one copy to fix -- ported from dotfiles'
+# original inline .github/workflows/nonempty-diff.yml.
+
+on:
+  workflow_call:
+    inputs:
+      base-ref:
+        description: "Override for the PR base ref; defaults to the triggering PR's base"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  nonempty:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: The PR changes something relative to its base
+        env:
+          BASE: ${{ inputs.base-ref || github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git fetch -q origin "$BASE"
+          if git diff --quiet "$(git merge-base "origin/$BASE" HEAD)" HEAD; then
+            echo "::error::this pull request's tree is identical to $BASE at the merge base: nothing would land. Its commits were reverted, or it is finished and should be closed."
+            exit 1
+          fi
+          echo "ok: $(git diff --shortstat "$(git merge-base "origin/$BASE" HEAD)" HEAD)"
