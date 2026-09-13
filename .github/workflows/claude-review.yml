@@ -138,6 +138,18 @@ jobs:
     concurrency:
       group: claude-review-${{ github.event.pull_request.number }}
       cancel-in-progress: false
+    # The seeded dotfiles hooks include a Stop hook that commits and pushes a
+    # dirty Claude-made checkout as the session's salvaged work. On this
+    # runner that checkout is dirty by construction -- claude-code-action
+    # restores the base branch's .claude/ paths over the pull request's --
+    # and git holds the Claude App's token, so the hook fast-forwarded main's
+    # .claude/ back onto pull request branches as "wip: session ... at Stop"
+    # by claude[bot] (mark-brannan/dotfiles#196). The hook now refuses under
+    # GITHUB_ACTIONS on its own; this is the switch it has always honoured,
+    # set here so a runner never depends on which version of the hook main
+    # happens to seed.
+    env:
+      CLAUDE_STOP_COMMIT: off
     permissions:
       contents: read
       pull-requests: write
