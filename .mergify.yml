@@ -6,9 +6,11 @@
 # and overrides a rule by restating it under the same name. Mergify does three
 # things here, and none of them needs a comment or a click.
 #
-# 1. It keeps open pull requests up to date with main. The branch ruleset
-#    requires branches to be up to date before merging, so without this every
-#    merge to main leaves the rest of the open pull requests stale.
+# 1. It keeps handed-over pull requests up to date with main. The branch
+#    ruleset requires branches to be up to date before merging, so without
+#    this every merge to main leaves the rest of them stale. Only once they
+#    are handed over, though: a branch an agent session is still working is
+#    that session's to rebase, and a second writer on it clobbers work.
 # 2. It merges dependabot's updates once the gate is green. Dependabot is the
 #    volume, and the part nobody is really reviewing.
 # 3. It offers the merge queue for anything else, on request: `@mergifyio queue`.
@@ -48,13 +50,22 @@ queue_rules:
       - check-success=ci-gate / gate
 
 pull_request_rules:
-  - name: Update pull requests that have fallen behind main
+  - name: Update pull requests that have fallen behind main, once handed over
     conditions:
       - base=main
       - -draft
       - -conflict
       - -closed
       - '#commits-behind>0'
+      # Only once the pull request is waiting on a human. While an agent
+      # session holds a branch, that session is the only writer: it rebases
+      # before it pushes and again before it hands over. Mergify writing a
+      # merge commit into the same branch made two writers, and the session's
+      # local checkout was stale from that moment -- which is how a push
+      # clobbered work, and how merge commits piled up on a live branch. The
+      # label goes on when the gate is green and every thread is resolved, so
+      # it is exactly the window where nobody else is pushing.
+      - label=awaiting-human
       # Automatic rules are not covered by commands_restrictions, and anyone
       # with read access can open a pull request off an existing branch of a
       # public repo. Without this, that stranger's pull request would have
