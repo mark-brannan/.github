@@ -9,7 +9,9 @@ name: nonempty-diff
 # to call an empty PR green.
 #
 # Reusable so every caller shares one copy to fix -- ported from dotfiles'
-# original inline .github/workflows/nonempty-diff.yml.
+# original inline .github/workflows/nonempty-diff.yml. Callers list it in
+# their ci-gate `needs`, so it costs no ruleset entry; on a non-PR run (push
+# to main) there is no base to diff against and it passes with a note.
 
 on:
   workflow_call:
@@ -35,6 +37,10 @@ jobs:
           BASE: ${{ inputs.base-ref || github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
+          if [ -z "$BASE" ]; then
+            echo "not a pull request: nothing to compare"
+            exit 0
+          fi
           git fetch -q origin "$BASE"
           if git diff --quiet "$(git merge-base "origin/$BASE" HEAD)" HEAD; then
             echo "::error::this pull request's tree is identical to $BASE at the merge base: nothing would land. Its commits were reverted, or it is finished and should be closed."
