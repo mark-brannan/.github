@@ -37,7 +37,7 @@ name: prose-budget
 #
 #     jobs:
 #       prose-budget:
-#         uses: mark-brannan/.github/.github/workflows/prose-budget.yml@v1
+#         uses: mark-brannan/.github/.github/workflows/prose-budget.yml@main
 #       ci-gate:
 #         needs: [test, prose-budget]
 #         if: always()
