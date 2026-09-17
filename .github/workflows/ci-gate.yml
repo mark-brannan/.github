@@ -23,6 +23,14 @@ name: ci-gate
 # not a dependable block: a job skipped by `if` reports `skipped`, while a
 # whole workflow skipped by path or branch filters leaves the check pending
 # forever. Neither is the verdict a ruleset needs.
+#
+# `gate` is the required check and its name is fixed, so on a red PR the
+# merge box shows "ci-gate / gate -- Failing" and nothing else about why.
+# The `why` job is the fix: it is not required by any ruleset, so its name
+# is free to carry the verdict -- "ci-gate / not green: test nonempty" on a
+# red run, "ci-gate / green" on a clean one -- and it sits in the merge box
+# next to the gate. Same information is in the gate's step summary for the
+# Checks tab. Do not add `why` to a ruleset: its name changes.
 
 on:
   workflow_call:
@@ -42,21 +50,51 @@ jobs:
     # It reads nothing and writes nothing; the results arrive as an input.
     permissions: {}
     runs-on: ubuntu-latest
+    outputs:
+      bad: ${{ steps.check.outputs.bad }}
     steps:
-      - env:
+      - id: check
+        env:
           RESULTS: ${{ inputs.results }}
           ALLOW_SKIPPED: ${{ inputs.allow-skipped }}
         run: |
           jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$RESULTS"
           if [ "$(jq 'length' <<<"$RESULTS")" -eq 0 ]; then
-            echo "::error::ci-gate has no dependencies; nothing was tested"
-            exit 1
+            echo "bad=(no dependencies)" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           ok='["success"]'
           [ "$ALLOW_SKIPPED" = true ] && ok='["success","skipped"]'
           bad=$(jq -r --argjson ok "$ok" \
             '[to_entries[] | select([.value.result] | inside($ok) | not) | .key] | join(" ")' <<<"$RESULTS")
-          if [ -n "$bad" ]; then
-            echo "::error::not green: $bad"
-            exit 1
-          fi
+          echo "bad=$bad" >> "$GITHUB_OUTPUT"
+          {
+            echo "| job | result |"
+            echo "| --- | --- |"
+            jq -r 'to_entries[] | "| \(.key) | \(if .value.result == "success" then "✅" else "❌" end) \(.value.result) |"' <<<"$RESULTS"
+          } >> "$GITHUB_STEP_SUMMARY"
+      # The verdict is a separate step so `bad` is recorded whether or not
+      # the job goes on to fail.
+      - env:
+          BAD: ${{ steps.check.outputs.bad }}
+        run: |
+          case "$BAD" in
+            "") echo green ;;
+            "(no dependencies)") echo "::error::ci-gate has no dependencies; nothing was tested"; exit 1 ;;
+            *) echo "::error::not green: $BAD"; exit 1 ;;
+          esac
+
+  # Not required by any ruleset; see the header. It reports what `gate`
+  # found under a name a human can read from the merge box.
+  why:
+    needs: gate
+    if: always()
+    name: "${{ needs.gate.outputs.bad && format('not green: {0}', needs.gate.outputs.bad) || 'green' }}"
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          BAD: ${{ needs.gate.outputs.bad }}
+        run: |
+          if [ -n "$BAD" ]; then echo "::error::not green: $BAD"; exit 1; fi
+          echo green
