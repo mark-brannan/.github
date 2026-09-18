@@ -1,0 +1,53 @@
+name: adr-elsewhere
+
+# One family of packages, one ADR sequence, and it lives in the repository
+# named by `home`. A repository that writes its own ADR spends a number the
+# home repository has already spent, and a number is cited from commit
+# messages, PR bodies and other ADRs long before anyone notices the clash --
+# so renumbering afterwards is not a rename, it is a rewrite of every
+# citation. That is why this is a gate and not a warning.
+#
+# A caller's docs/adr/ may hold pointers to decisions that moved to the home
+# repository, and nothing else. A pointer's first line is
+# `# ADR NNNN — moved`; mark-brannan/colregs-engine docs/adr/ is the worked
+# example. The home repository never calls this workflow -- its ADRs are the
+# sequence being protected.
+
+on:
+  workflow_call:
+    inputs:
+      home:
+        description: "The repository that owns the ADR sequence"
+        required: false
+        default: mark-brannan/colregs
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  adr-elsewhere:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: The ADR sequence belongs to another repository
+        env:
+          HOME_REPO: ${{ inputs.home }}
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r f; do
+            if head -n1 -- "$f" | grep -qx '# ADR [0-9]\{4\} — moved'; then continue; fi
+            echo "::error file=$f::docs/adr/ holds pointers only. Write this decision in $HOME_REPO docs/adr/ and leave a '# ADR NNNN — moved' pointer here."
+            fail=1
+          done < <(git ls-files -- 'docs/adr/*.md')
+          while IFS= read -r f; do
+            if head -n1 -- "$f" | grep -q '^# ADR '; then
+              echo "::error file=$f::an ADR outside docs/adr/. The ADR sequence belongs to $HOME_REPO."
+              fail=1
+            fi
+          done < <(git ls-files -- '*.md' ':!:docs/adr/*')
+          [ "$fail" = 0 ] || exit 1
+          echo "ok: $(git ls-files -- 'docs/adr/*.md' | wc -l) pointer(s), no local ADR"
