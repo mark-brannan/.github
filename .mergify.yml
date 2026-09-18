@@ -98,12 +98,15 @@ pull_request_rules:
     # Toggle, not add: a push that turns the gate red or a bot that opens a
     # thread takes the label off again, so it never says something stale.
     # Dependabot is left out because the rule above merges it unasked.
+    # blocked means a human decided this isn't ready despite green CI --
+    # a re-evaluation (a push, a thread event) must not overrule that.
     conditions:
       - base=main
       - -draft
       - -conflict
       - -closed
       - -author=dependabot[bot]
+      - -label=blocked
       - check-success=ci-gate / gate
       - "#review-threads-unresolved=0"
     actions:
