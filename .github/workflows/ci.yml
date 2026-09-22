@@ -1,0 +1,63 @@
+name: CI
+
+# This repo defines the reusable workflows every other repository calls at
+# `@main` -- an unreviewed change here has the widest blast radius of any
+# repo in the fleet, and until now it was the only one with no gate: no
+# secret scan, no non-empty-diff check, no ci-gate (issue #34). An empty PR
+# here would merge green, the exact dotfiles#198 failure mode that
+# nonempty-diff.yml itself exists to catch.
+#
+# Local path, not @main: every `uses:` below points at this repo's own
+# ./.github/workflows/*.yml, so a PR is gated on the copy it is actually
+# changing. Every other repo that calls these workflows uses @main -- and
+# should, since a normal caller has no reason to trust an unmerged version
+# of someone else's shared workflow -- but self-referencing at @main here
+# would mean a PR that breaks a reusable workflow gates on the unbroken
+# main copy and merges anyway. That defeats the point of gating this repo
+# at all. See #34 for the tradeoff.
+#
+# Same ci-gate fan-in pattern as every vended repo (ci-gate.yml has the
+# contract): the ruleset requires exactly one context, `ci-gate / gate`,
+# and adding or renaming a dependency job changes a `needs:` line, not a
+# ruleset. Unlike dotfiles/symphony/colregs-engine, secret-scan's two jobs
+# are folded into ci-gate here rather than required directly -- this repo
+# has no repo-specific gating jobs alongside it, so one required context is
+# simpler than three.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Refuses to call an empty PR green -- see nonempty-diff.yml for why.
+  nonempty:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/nonempty-diff.yml
+
+  # Full-history secret scan -- see secret-scan.yml for why gitleaks and
+  # trufflehog are both needed and why trufflehog's redaction has to be
+  # inline. No gitleaks-config: this repo has no .gitleaks.toml.
+  secret-scan:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/secret-scan.yml
+
+  # The single required status check. `always()` lets it evaluate when a
+  # dependency failed or was skipped instead of inheriting the skip.
+  ci-gate:
+    needs: [nonempty, secret-scan]
+    if: always()
+    permissions: {}
+    uses: ./.github/workflows/ci-gate.yml
+    with:
+      results: ${{ toJSON(needs) }}
