@@ -109,7 +109,15 @@ pull_request_rules:
       - -label=blocked
       - check-success=ci-gate / gate
       - "#review-threads-unresolved=0"
+      # Any red check, not just the gate: secret-scan runs outside ci-gate.
+      - "#check-failure=0"
+      - "#changes-requested-reviews-by=0"
     actions:
       label:
         toggle:
           - awaiting-human
+        # A PR a fixer session gave up on loses that mark once it is green
+        # and thread-free. No-op in a repo without the label -- pr-label-audit
+        # reports the ones missing it.
+        remove:
+          - fixup-hard
