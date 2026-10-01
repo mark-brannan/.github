@@ -164,13 +164,18 @@ jobs:
       # public-issue-guard.sh and the other fail-closed PreToolUse hooks
       # deny every Bash call unless they exist under $HOME -- a bare runner
       # never has them, so the review agent could read the diff but not
-      # execute anything. cloud-session-setup.sh is dotfiles' own installer
-      # for exactly this: this step is its documented ephemeral-session
-      # invocation. Verified against a marker file (public-issue-guard.sh),
-      # not the installer's exit code -- it always exits 0 (a missing
-      # dotfile must never fail a cloud session), so a silent partial
-      # install would otherwise look identical to a real one.
-      - name: Seed $HOME with the dotfiles review hooks
+      # execute anything. The claude-config composite action
+      # (mark-brannan/dotfiles#326) checks dotfiles out and runs its
+      # cloud-session-setup.sh, so the install logic lives in one place.
+      - name: Seed $HOME with Claude config from dotfiles
+        if: inputs.seed-home
+        uses: mark-brannan/dotfiles/.github/actions/claude-config@main
+
+      # Verified against a marker file (public-issue-guard.sh), not the
+      # installer's exit code -- it always exits 0 (a missing dotfile must
+      # never fail a cloud session), so a silent partial install would
+      # otherwise look identical to a real one.
+      - name: Verify the seed
         id: seed
         env:
           SEED_HOME: ${{ inputs.seed-home }}
@@ -178,12 +183,6 @@ jobs:
           if [ "$SEED_HOME" != "true" ]; then
             echo "note=seed-home is false; \$HOME was not seeded here, Bash calls may be fully or partially gated by whatever guards the runner already has" >> "$GITHUB_OUTPUT"
             exit 0
-          fi
-          SEED="$HOME/.local/share/dotfiles-seed"
-          if git clone -q https://github.com/mark-brannan/dotfiles "$SEED"; then
-            CLOUD_SESSION=1 sh "$SEED/.local/bin/cloud-session-setup.sh"
-          else
-            echo "::warning::failed to clone mark-brannan/dotfiles -- \$HOME is not seeded, Bash calls will be gated fail-closed"
           fi
           if [ -f "$HOME/.claude/hooks/public-issue-guard.sh" ]; then
             echo "note=\$HOME seeded from mark-brannan/dotfiles; public-issue-guard.sh and the other review hooks are present, Bash calls should run normally" >> "$GITHUB_OUTPUT"
