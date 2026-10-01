@@ -201,8 +201,15 @@ jobs:
         id: fp
         env:
           BASE: ${{ github.event.pull_request.base.ref }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git fetch -q origin "$BASE"
+          # Checkout runs with persist-credentials: false, so this fetch is
+          # anonymous unless authenticated here: fine on a public repo,
+          # "could not read Username" on a private one. The header lives on
+          # this one command, never in .git/config.
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" fetch -q origin "$BASE"
           raw=$(git diff-tree -r --no-commit-id "$(git merge-base "origin/$BASE" HEAD)" HEAD)
           if [ -n "$raw" ]; then id=$(printf '%s\n' "$raw" | sha256sum | cut -d' ' -f1); else id=empty; fi
           echo "id=$id" >> "$GITHUB_OUTPUT"
