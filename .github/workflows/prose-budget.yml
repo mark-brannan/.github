@@ -3,8 +3,8 @@ name: prose-budget
 # Shared by every repository: one deterministic guard against agents
 # degrading documentation -- line budgets, section word caps, net-prose
 # delta, JSON prose caps, narration and voice patterns, land-alone rules.
-# The engine is `prose-budget` in mark-brannan/dotfiles (.local/bin, single
-# Python 3 file, stdlib only); this workflow only fetches it and runs it, so
+# The engine is `prose-budget` in mark-brannan/claude (`bin/`, single
+# Python 3 file, stdlib only; that repo's root is ~/.claude); this workflow only fetches it and runs it, so
 # the rules and their tests live in one place and every consumer picks up a
 # fix at its next run. Configuration is the only thing that varies per
 # repository: `docs/budgets.json` or `.prose-budgets.json`, which the engine
@@ -12,19 +12,20 @@ name: prose-budget
 #
 # Same mechanism as secret-scan.yml: the first checkout is the CALLER's repo
 # (workflow_call runs in the caller's context), the second pulls just the
-# engine file from dotfiles into `.prose-budget-engine/`. That directory is
+# engine file from mark-brannan/claude into `.prose-budget-engine/`. That directory is
 # never a target: the engine reads only the files the config lists, and the
 # path is dot-prefixed so no default glob picks it up.
 #
-# `dotfiles-ref` defaults to `main`, same as every other workflow in this
+# `claude-ref` defaults to `main`, same as every other workflow in this
 # repository, same as every consumer's `uses:` line below. No pinning,
-# anywhere, ever -- tried once (an immutable dotfiles engine tag, a moving
+# anywhere, ever -- tried once (an immutable engine tag, a moving
 # `v1` tag on this repository consumers pinned to), reverted
 # (mark-brannan/colregs#78, mark-brannan/colregs-engine#54,
 # mark-brannan/symphony#66; mark-brannan/.github#18 closed on the ruling).
-# A fix or a break in the engine on dotfiles `main` reaches every consumer at
-# its next run; that propagation is the point. A consumer may still override
-# `dotfiles-ref` to try an engine branch before it lands.
+# A fix or a break in the engine on mark-brannan/claude `main` reaches every
+# consumer at its next run; that propagation is the point. A consumer may
+# still override `claude-ref` to try an engine branch before it lands. The
+# engine moved here from mark-brannan/dotfiles `.local/bin` (dotfiles#358).
 #
 # On a pull_request event the engine runs with `--base <base sha>`, so the
 # change rules (`delta`, `land_alone`, diff-scoped `voice`) judge
@@ -54,11 +55,16 @@ on:
         required: false
         type: string
         default: ''
-      dotfiles-ref:
-        description: Ref of mark-brannan/dotfiles to fetch the engine from; defaults to main, override to test an engine branch early
+      claude-ref:
+        description: Ref of mark-brannan/claude to fetch the engine from; defaults to main, override to test an engine branch early
         required: false
         type: string
         default: main
+      dotfiles-ref:
+        description: Deprecated and ignored (the engine no longer comes from mark-brannan/dotfiles); kept so callers that still pass it do not fail. Use claude-ref
+        required: false
+        type: string
+        default: ''
       require-config:
         description: Fail when no config is found (passes --require-config); off, a repo with no config passes silently
         required: false
@@ -81,12 +87,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       # The checkout above is the CALLER's repo -- it doesn't have the
-      # engine. Pull just that one file from dotfiles.
+      # engine. Pull just that one file from mark-brannan/claude.
       - uses: actions/checkout@v7
         with:
-          repository: mark-brannan/dotfiles
-          ref: ${{ inputs.dotfiles-ref }}
-          sparse-checkout: /.local/bin/prose-budget
+          repository: mark-brannan/claude
+          ref: ${{ inputs.claude-ref }}
+          sparse-checkout: /bin/prose-budget
           sparse-checkout-cone-mode: false
           path: .prose-budget-engine
           persist-credentials: false
@@ -98,18 +104,18 @@ jobs:
           REQUIRE_CONFIG: ${{ inputs.require-config }}
           WARN_ONLY: ${{ inputs.warn-only }}
           BASE: ${{ github.event.pull_request.base.sha }}
-          DOTFILES_REF: ${{ inputs.dotfiles-ref }}
+          CLAUDE_REF: ${{ inputs.claude-ref }}
         run: |
           set -uo pipefail
-          engine=.prose-budget-engine/.local/bin/prose-budget
+          engine=.prose-budget-engine/bin/prose-budget
           if [ ! -f "$engine" ]; then
-            echo "::error::engine not found at $engine (dotfiles ref: $DOTFILES_REF)"
+            echo "::error::engine not found at $engine (claude ref: $CLAUDE_REF)"
             exit 1
           fi
           # Names the engine that produced the findings, so a run log answers
           # "which version was this" without going back to the tags. After the
           # guard above, so a missing engine still reports as ::error::.
-          echo "engine: $(python3 "$engine" --version) (dotfiles ref: $DOTFILES_REF)"
+          echo "engine: $(python3 "$engine" --version) (claude ref: $CLAUDE_REF)"
           args=()
           if [ -n "$CONFIG" ]; then args+=(--config "$CONFIG"); fi
           if [ "$REQUIRE_CONFIG" = true ]; then args+=(--require-config); fi
