@@ -43,6 +43,9 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/nonempty-diff.yml
+    with:
+      # Gate on this PR's own tab check and allowlist, not main's.
+      shared-ref: ${{ github.sha }}
 
   # Full-history secret scan -- see secret-scan.yml for why gitleaks and
   # trufflehog are both needed and why trufflehog's redaction has to be
