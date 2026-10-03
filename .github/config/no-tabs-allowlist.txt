@@ -1,0 +1,10 @@
+# Files exempt from the no-added-tabs check in workflows/nonempty-diff.yml.
+# One glob per line; `#` starts a comment. A pattern without a slash matches
+# the file name in any directory (`Makefile` covers `sub/Makefile`); a pattern
+# with a slash matches the path from the repo root. Add a file type here only
+# when the format itself requires tab indentation.
+Makefile
+makefile
+GNUmakefile
+*.mk
+*.go
