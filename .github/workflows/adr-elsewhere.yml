@@ -9,7 +9,7 @@ name: adr-elsewhere
 #
 # A caller's docs/adr/ may hold pointers to decisions that moved to the home
 # repository, and nothing else. A pointer's first line is
-# `# ADR NNNN — moved`; mark-brannan/colregs-engine docs/adr/ is the worked
+# `# ADR NNNN - moved`; mark-brannan/colregs-engine docs/adr/ is the worked
 # example. The home repository never calls this workflow -- its ADRs are the
 # sequence being protected.
 
@@ -39,8 +39,8 @@ jobs:
           set -euo pipefail
           fail=0
           while IFS= read -r f; do
-            if head -n1 -- "$f" | grep -qx '# ADR [0-9]\{4\} - moved'; then continue; fi
-            echo "::error file=$f::docs/adr/ holds pointers only. Write this decision in $HOME_REPO docs/adr/ and leave a '# ADR NNNN — moved' pointer here."
+            if head -n1 -- "$f" | grep -qE '^# ADR [0-9]{4}[^[:alnum:]]+moved$'; then continue; fi
+            echo "::error file=$f::docs/adr/ holds pointers only. Write this decision in $HOME_REPO docs/adr/ and leave a '# ADR NNNN - moved' pointer here."
             fail=1
           done < <(git ls-files -- 'docs/adr/*.md')
           while IFS= read -r f; do
