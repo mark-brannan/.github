@@ -80,6 +80,10 @@ on:
           resembles a live credential, say so as a blocking finding and do
           not quote the value back in your comment.
 
+          Flag comments, skills or md that carry decision history (what was
+          decided, when, in which sitting); a pointer to the design or a
+          one-line why is fine.
+
           Verify rather than hand-trace: `npm ci` then `npm test`, and
           `npm run build` where the repository has one. "Verified" must
           mean executed. Say what you ran, including when it passed.
