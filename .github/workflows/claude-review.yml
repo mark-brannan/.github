@@ -169,11 +169,21 @@ jobs:
       # deny every Bash call unless they exist under $HOME -- a bare runner
       # never has them, so the review agent could read the diff but not
       # execute anything. The claude-config composite action
-      # (mark-brannan/dotfiles#326) checks dotfiles out and runs its
-      # cloud-session-setup.sh, so the install logic lives in one place.
+      # (mark-brannan/dotfiles#326) checks out mark-brannan/claude (the
+      # config content) and mark-brannan/dotfiles (the four guard hooks),
+      # so the install logic lives in one place.
+      #
+      # Both the action and its two content refs are pinned to a reviewed
+      # commit, not `main` -- the exact CodeRabbit finding
+      # (signalk-noaa-space-weather#97) that opened dotfiles#17. Bump by
+      # hand after reviewing `git log main` on each repo; nothing here
+      # auto-advances.
       - name: Seed $HOME with Claude config from dotfiles
         if: inputs.seed-home
-        uses: mark-brannan/dotfiles/.github/actions/claude-config@main
+        uses: mark-brannan/dotfiles/.github/actions/claude-config@c6415cabc98e8d04e41ca15cd01ebe0b041558e4
+        with:
+          claude-ref: 784e1f519b5ac1b2ae073a8db4c465cd05cf2e98
+          ref: c6415cabc98e8d04e41ca15cd01ebe0b041558e4
 
       # Verified against a marker file (public-issue-guard.sh), not the
       # installer's exit code -- it always exits 0 (a missing dotfile must
