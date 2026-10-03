@@ -171,6 +171,9 @@ jobs:
       # execute anything. The claude-config composite action
       # (mark-brannan/dotfiles#326) checks dotfiles out and runs its
       # cloud-session-setup.sh, so the install logic lives in one place.
+      #
+      # `@main` is deliberate: first-party refs are never pinned, at any hop
+      # (mark-brannan/.github#18, README "Nothing here is ever pinned"). Don't pin this.
       - name: Seed $HOME with Claude config from dotfiles
         if: inputs.seed-home
         uses: mark-brannan/dotfiles/.github/actions/claude-config@main
