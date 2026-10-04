@@ -12,7 +12,7 @@ name: prose-budget
 #
 # Same mechanism as secret-scan.yml: the first checkout is the CALLER's repo
 # (workflow_call runs in the caller's context), the second pulls just the
-# engine file from mark-brannan/claude into `.prose-budget-engine/`. That directory is
+# engine file and its lib/gitrun.py from mark-brannan/claude into `.prose-budget-engine/`. That directory is
 # never a target: the engine reads only the files the config lists, and the
 # path is dot-prefixed so no default glob picks it up.
 #
@@ -87,12 +87,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       # The checkout above is the CALLER's repo -- it doesn't have the
-      # engine. Pull just that one file from mark-brannan/claude.
+      # engine. Pull just the engine and the lib/ module it imports from
+      # beside itself (lib/gitrun.py; stdlib only) from mark-brannan/claude.
       - uses: actions/checkout@v7
         with:
           repository: mark-brannan/claude
           ref: ${{ inputs.claude-ref }}
-          sparse-checkout: /bin/prose-budget
+          sparse-checkout: |
+            /bin/prose-budget
+            /lib/gitrun.py
           sparse-checkout-cone-mode: false
           path: .prose-budget-engine
           persist-credentials: false
