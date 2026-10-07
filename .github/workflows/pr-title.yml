@@ -5,14 +5,21 @@ name: pr-title
 # repos' own convention is `area: summary` ("settings: deny the Mergify
 # stack skill (#76)"); this check holds a title to that shape and nothing
 # more -- it does not choose among areas, and it does not require
-# conventional-commit types. Which shape the fleet enforces is the user's
-# ruling (claude_prompts_scratch card 17913674070dd05771); change PATTERN
-# below to follow it.
+# conventional-commit types, though it accepts one with a scope
+# ("fix(schema): ...", release-please's "chore(main): release 1.2.0").
+# Which shape the fleet enforces is the user's ruling
+# (claude_prompts_scratch card 17913674070dd05771); change PATTERN below to
+# follow it.
 #
 # Reusable, like nonempty-diff: callers list it in their ci-gate `needs`, so
-# it costs no ruleset entry. Cost: one job of seconds per PR event. A caller
-# triggers it on pull_request types opened, edited, reopened, synchronize.
-# On a non-PR run (push to main) there is no title and it passes with a note.
+# it costs no ruleset entry. Cost: one job of seconds per PR event. Callers
+# keep the default pull_request types; adding `edited` would rerun every job
+# in `needs` on each body edit. Instead the job reads the live title, so the
+# fix for a bad title is to edit it and re-run this job -- a re-run replays
+# the original event, whose payload still holds the old title.
+#
+# Exempt: a non-PR run (push to main) has no title, and a bot's PR
+# (Dependabot, release-please) has a title nobody edits by hand.
 
 on:
   workflow_call:
@@ -23,19 +30,31 @@ jobs:
   title:
     runs-on: ubuntu-latest
     steps:
-      - name: The title reads `area: summary`
+      - name: "The title reads `area: summary`"
         env:
-          TITLE: ${{ github.event.pull_request.title }}
-          # area: lowercase word, may hold . / _ - ; then a colon, a space and a summary
-          PATTERN: '^[a-z][a-z0-9._/-]*: [^ ].*$'
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_TITLE: ${{ github.event.pull_request.title }}
+          AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          # area: lowercase word, may hold . / _ - ; an optional (scope) and
+          # !; then a colon, a space and a summary
+          PATTERN: '^[a-z][a-z0-9._/-]*(\([^)]+\))?!?: [^ ].*$'
         run: |
           set -euo pipefail
-          if [ -z "$TITLE" ]; then
+          if [ -z "$NUMBER" ]; then
             echo "not a pull request: no title to check"
             exit 0
           fi
+          if [ "$AUTHOR_TYPE" = Bot ]; then
+            echo "opened by a bot: title not checked"
+            exit 0
+          fi
+          # The live title, so a re-run after an edit sees the edit; the
+          # event's copy if the token cannot read the pull request.
+          TITLE=$(gh api "repos/$REPO/pulls/$NUMBER" --jq .title 2>/dev/null) || TITLE=$EVENT_TITLE
           if [[ ! "$TITLE" =~ $PATTERN ]]; then
-            echo "::error::title \"$TITLE\" is not \`area: summary\` (for example \"settings: deny the Mergify stack skill\"). Edit the title; the check reruns on edit."
+            echo "::error::title \"$TITLE\" is not \`area: summary\` (for example \"settings: deny the Mergify stack skill\"). Edit the title, then re-run this job."
             exit 1
           fi
           echo "ok: $TITLE"
