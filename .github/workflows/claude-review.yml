@@ -185,9 +185,10 @@ jobs:
         uses: mark-brannan/dotfiles/.github/actions/claude-config@main
 
       # Verified against the action's `complete` output, not its exit code
-      # or a file it happens to ship today -- it always exits 0 (a missing
-      # dotfile must never fail a cloud session), so a silent partial install
-      # would otherwise look identical to a real one.
+      # or a file it happens to ship today -- a silent partial install would
+      # otherwise look identical to a real one. `complete` vouches for the
+      # config, not for hooks that arrive through a plugin, so the note
+      # below claims no more than that.
       - name: Verify the seed
         id: seed
         env:
@@ -199,7 +200,7 @@ jobs:
             exit 0
           fi
           if [ "$SEED_COMPLETE" = "true" ]; then
-            echo "note=\$HOME seeded from mark-brannan/claude; the config and its review hooks are present, Bash calls should run normally" >> "$GITHUB_OUTPUT"
+            echo "note=\$HOME seeded from mark-brannan/claude (the claude-config action reports a complete install); Bash calls should run normally" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::Claude config seeding reported incomplete -- this review will run degraded"
             echo "note=\$HOME seeding was incomplete -- Bash calls may be denied fail-closed or may run unguarded; say so plainly in your summary comment" >> "$GITHUB_OUTPUT"
