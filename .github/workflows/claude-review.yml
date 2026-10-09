@@ -99,6 +99,11 @@ on:
         required: false
         type: string
         default: mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(npm ci),Bash(npm test),Bash(npm run build:*)
+      model:
+        description: The model the review runs on. Named here so the choice is visible, not left to the action's default.
+        required: false
+        type: string
+        default: claude-sonnet-5-5
       allowed-bots:
         description: Bot logins whose pull requests are reviewed anyway (the action refuses non-human actors by default). Overriding replaces this default, so include mergify[bot] and mark-brannan-release-please[bot] in the override too.
         required: false
@@ -282,9 +287,18 @@ jobs:
             also Read .writing-rubric.md (skip this if the file is missing)
             and comment where an added line breaks a rule in it, citing the
             rule.
+
+            Label every finding `toil` or `judgment`. Toil is anything the
+            author can settle alone -- a bug, a missed case, a name, a
+            broken convention: give the exact fix. Judgment is a question of
+            values, risk, direction, legal or people: name which, and say
+            why the diff cannot settle it. Ask no question whose answer the
+            repository already gives or the author would find obvious; state
+            the answer as a toil finding instead.
           # Comments cannot go inside claude_args; the action passes that
           # block through to the CLI verbatim.
           claude_args: |
+            --model "${{ inputs.model }}"
             --allowedTools "${{ inputs.allowed-tools }},Read(.writing-rubric.md)"
 
       - if: steps.seen.outputs.cache-hit != 'true' && steps.tok.outputs.present == 'true'
