@@ -67,8 +67,6 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/complexity.yml
-    with:
-      shared-ref: ${{ github.event.pull_request.head.sha }}
 
   # The single required status check. `always()` lets it evaluate when a
   # dependency failed or was skipped instead of inheriting the skip.

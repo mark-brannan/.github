@@ -26,14 +26,10 @@ name: complexity
 #           contents: read
 #         uses: mark-brannan/.github/.github/workflows/complexity.yml@main
 
+# No ref input: the engine always comes from main, except on this
+# repository's own PRs, which run the engine they carry from their checkout.
 on:
   workflow_call:
-    inputs:
-      shared-ref:
-        description: Ref of mark-brannan/.github to fetch the engine from; defaults to main, override to test an engine change early
-        required: false
-        type: string
-        default: main
 
 env:
   LIZARD_VERSION: 1.24.1
@@ -53,10 +49,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/checkout@v7
+      - if: github.repository != 'mark-brannan/.github'
+        uses: actions/checkout@v7
         with:
           repository: mark-brannan/.github
-          ref: ${{ inputs.shared-ref }}
+          ref: main
           sparse-checkout: |
             /.github/scripts/complexity.py
           sparse-checkout-cone-mode: false
@@ -80,11 +77,13 @@ jobs:
       - name: complexity
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
-          SHARED_REF: ${{ inputs.shared-ref }}
+          SELF: ${{ github.repository == 'mark-brannan/.github' }}
         run: |
           set -euo pipefail
-          echo "engine: .github ref $SHARED_REF · lizard $(lizard --version) · shellmetrics $SHELLMETRICS_COMMIT · rust-code-analysis $RCA_VERSION"
-          python3 .complexity-engine/.github/scripts/complexity.py --base "$BASE" --require-tools \
+          engine=.complexity-engine/.github/scripts/complexity.py
+          if [ "$SELF" = true ]; then engine=.github/scripts/complexity.py; fi
+          echo "engine: $engine · lizard $(lizard --version) · shellmetrics $SHELLMETRICS_COMMIT · rust-code-analysis $RCA_VERSION"
+          python3 "$engine" --base "$BASE" --require-tools \
             --json "$RUNNER_TEMP/complexity.json" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Upload every metric
         if: always()
