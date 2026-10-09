@@ -66,6 +66,7 @@ jobs:
   complexity:
     permissions:
       contents: read
+      pull-requests: write
     uses: ./.github/workflows/complexity.yml
 
   # The single required status check. `always()` lets it evaluate when a
