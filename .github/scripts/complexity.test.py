@@ -126,7 +126,10 @@ class Complexity(unittest.TestCase):
                          (1, 7, 2, 1, 3))
         self.assertEqual(after["mi"]["mi_original"], 90.0)
         self.assertIn("volume", after["halstead"])
-        self.assertIn("| Cognitive |", p.stdout)
+        self.assertIn("| File | Function | Cyclomatic | Δ | Cognitive |", p.stdout)
+        self.assertIn("| `a.py:%d` | `f` | 2 → 4 | +2 | 20 → 40 |" % row["line"], p.stdout)
+        self.assertIn("\nMeasured 6 changed files, %s against %s. A measurement, not a gate.\n" % (
+            report["head"][:7], report["base"][:7]), p.stdout)
         head, _, rest = p.stdout.partition("<details>")
         self.assertNotIn("halstead", head.lower())
         self.assertIn("<summary>All metrics</summary>", rest)
