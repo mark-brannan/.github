@@ -245,6 +245,18 @@ jobs:
             echo "::warning::CLAUDE_CODE_OAUTH_TOKEN is not set; skipping the review"
           fi
 
+      # The writing rubric lives once, in mark-brannan/claude. Fetched here,
+      # before the agent starts, so the agent gets a Read of one file and no
+      # `gh api` of its own. A failed fetch only costs the prose check.
+      - if: steps.seen.outputs.cache-hit != 'true' && steps.tok.outputs.present == 'true'
+        name: Fetch the writing rubric
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/mark-brannan/claude/contents/rules/writing.md \
+            -H 'Accept: application/vnd.github.raw' > .writing-rubric.md
+
       # Pinned off v1.0.218's Claude Code 2.1.265 install: on a cold Actions
       # cache the native installer's launcher step fails silently -- exits 0,
       # prints "successfully installed", but its own setup notes say
@@ -259,7 +271,7 @@ jobs:
       # runner has no plugin cache, so the action installs it here.
       - if: steps.seen.outputs.cache-hit != 'true' && steps.tok.outputs.present == 'true'
         id: review
-        uses: anthropics/claude-code-action@8ce9314fa9a404564fa7e954cd84f25bcba2b829 # v1.0.236
+        uses: anthropics/claude-code-action@6c690188da61cf16ee7debb28383ba67f02abb4c # v1.0.242
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
@@ -272,10 +284,15 @@ jobs:
             HOME SEEDING: ${{ steps.seed.outputs.note }}
 
             ${{ inputs.prompt }}
+
+            For added or changed README, CHANGELOG, docs and SKILL.md prose,
+            also Read .writing-rubric.md (skip this if the file is missing)
+            and comment where an added line breaks a rule in it, citing the
+            rule.
           # Comments cannot go inside claude_args; the action passes that
           # block through to the CLI verbatim.
           claude_args: |
-            --allowedTools "${{ inputs.allowed-tools }}"
+            --allowedTools "${{ inputs.allowed-tools }},Read(.writing-rubric.md)"
 
       # Proof the guards were live, read from the session's own init message
       # rather than from what the install step claimed. Checked after the run
