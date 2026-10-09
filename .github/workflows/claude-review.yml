@@ -250,6 +250,19 @@ jobs:
             echo "::warning::CLAUDE_CODE_OAUTH_TOKEN is not set; skipping the review"
           fi
 
+      # The seeded settings.json declares the languette marketplace as a
+      # `github` source, but the action only accepts an https .git URL, and
+      # Claude Code refuses to add a marketplace whose source differs from
+      # the one settings declares for that name. Restate the seeded entry as
+      # the same git URL the action adds, so the two agree.
+      - if: inputs.seed-home && steps.seen.outputs.cache-hit != 'true' && steps.tok.outputs.present == 'true'
+        name: Match the seeded languette marketplace to the action's URL
+        run: |
+          s="$HOME/.claude/settings.json"
+          [ -f "$s" ] || exit 0
+          jq 'if .extraKnownMarketplaces.languette then .extraKnownMarketplaces.languette.source = {"source": "git", "url": "https://github.com/mark-brannan/languette.git"} else . end' "$s" > "$s.tmp"
+          mv "$s.tmp" "$s"
+
       # The writing rubric lives once, in mark-brannan/claude. Fetched here,
       # before the agent starts, so the agent gets a Read of one file and no
       # `gh api` of its own. A failed fetch only costs the prose check.
