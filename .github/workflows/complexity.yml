@@ -99,7 +99,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -108,8 +107,7 @@ jobs:
           {
             echo "$mark"
             cat "$RUNNER_TEMP/complexity.md"
-            echo
-            echo "For ${HEAD:0:12}, by [complexity]($RUN_URL); every metric is in that run's \`complexity\` artifact."
+            echo "Every metric is in the run's \`complexity\` artifact: [complexity run]($RUN_URL)"
           } > "$body"
           # A comment holds 65536 characters; past that, keep the table and drop the collapsed metrics.
           if [ "$(wc -c < "$body")" -gt 60000 ]; then
