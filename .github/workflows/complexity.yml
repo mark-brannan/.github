@@ -16,6 +16,15 @@ name: complexity
 # shows cyclomatic and cognitive; every metric per function goes in the
 # `complexity` artifact (complexity.json, kept 90 days), logged, never weighted.
 #
+# The summary is also posted on the pull request as one comment, replaced on
+# each push, so a reviewer or the next session sees it without opening the
+# run. Posting needs `pull-requests: write`. This job declares no permissions
+# of its own and runs with whatever the caller grants: a called job that asks
+# for more than its caller allows fails at startup, before any step runs, so
+# declaring the write scope here would break a caller that grants only
+# `contents: read`. Without the scope (such a caller, or a fork's read-only
+# token) the comment is skipped with a notice and the job stays green.
+#
 # The tools are third-party, so they are pinned: lizard by version,
 # shellmetrics (a single script) by commit and checksum, rust-code-analysis
 # (a release binary) by version and checksum.
@@ -24,6 +33,7 @@ name: complexity
 #       complexity:
 #         permissions:
 #           contents: read
+#           pull-requests: write
 #         uses: mark-brannan/.github/.github/workflows/complexity.yml@main
 
 # No ref input: the engine always comes from main, except on this
@@ -42,8 +52,6 @@ jobs:
   complexity:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -84,7 +92,36 @@ jobs:
           if [ "$SELF" = true ]; then engine=.github/scripts/complexity.py; fi
           echo "engine: $engine · lizard $(lizard --version) · shellmetrics $SHELLMETRICS_COMMIT · rust-code-analysis $RCA_VERSION"
           python3 "$engine" --base "$BASE" --require-tools \
-            --json "$RUNNER_TEMP/complexity.json" | tee -a "$GITHUB_STEP_SUMMARY"
+            --json "$RUNNER_TEMP/complexity.json" > "$RUNNER_TEMP/complexity.md"
+          tee -a "$GITHUB_STEP_SUMMARY" < "$RUNNER_TEMP/complexity.md"
+      - name: Post the summary on the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          mark='<!-- complexity-report -->'
+          body="$RUNNER_TEMP/comment.md"
+          {
+            echo "$mark"
+            cat "$RUNNER_TEMP/complexity.md"
+            echo "Every metric is in the run's \`complexity\` artifact: [complexity run]($RUN_URL)"
+          } > "$body"
+          # A comment holds 65536 characters; past that, keep the table and drop the collapsed metrics.
+          if [ "$(wc -c < "$body")" -gt 60000 ]; then
+            sed -i '/^<details>$/,/^<\/details>$/d' "$body"
+          fi
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq "[.[] | select(.body | startswith(\"$mark\")) | .id] | first // empty" 2>/dev/null | head -n1 || true)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$body" > /dev/null \
+              || echo "::notice::complexity: could not update comment $id; the report is in the job summary."
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@"$body" > /dev/null \
+              || echo "::notice::complexity: could not comment (needs pull-requests: write); the report is in the job summary."
+          fi
       - name: Upload every metric
         if: always()
         uses: actions/upload-artifact@v7.0.2
