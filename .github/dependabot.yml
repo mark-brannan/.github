@@ -1,4 +1,9 @@
 version: 2
+
+# cooldown: wait 3 days after a release is published before proposing it. A
+# freshly published release is the riskiest one (yanked, compromised or
+# broken versions are usually caught in the first days), and this repo
+# auto-merges Dependabot PRs on a green gate.
 updates:
   # docker/{gitleaks,trufflehog}/Dockerfile are never built -- each is a
   # single FROM line, read at runtime by secret-scan.yml, so Dependabot has
@@ -9,13 +14,23 @@ updates:
     directory: /docker/gitleaks
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
   - package-ecosystem: docker
     directory: /docker/trufflehog
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
 
   # Actions used by this repo's own reusable workflows.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
+    groups:
+      actions:
+        patterns:
+          - "*"
