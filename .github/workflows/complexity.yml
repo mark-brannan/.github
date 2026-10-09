@@ -5,9 +5,9 @@ name: complexity
 # measurement, not a gate: the engine exits 0 whatever the numbers say, so
 # callers leave this job out of ci-gate's needs.
 #
-# The engine is `complexity` in mark-brannan/claude (`bin/`, stdlib Python);
-# this workflow fetches it, installs the two tools it drives and runs it, the
-# same mechanism as prose-budget.yml. It routes each changed file by
+# The engine is .github/scripts/complexity.py in this repository (stdlib
+# Python); this workflow fetches it, installs the two tools it drives and runs
+# it, the same mechanism as nonempty-diff.yml. It routes each changed file by
 # extension or shebang -- lizard for Python, JS/TS, Go, Rust and the rest it
 # knows, shellmetrics for sh/bash -- so a mixed repo needs no configuration.
 #
@@ -23,8 +23,8 @@ name: complexity
 on:
   workflow_call:
     inputs:
-      claude-ref:
-        description: Ref of mark-brannan/claude to fetch the engine from; defaults to main, override to test an engine branch early
+      shared-ref:
+        description: Ref of mark-brannan/.github to fetch the engine from; defaults to main, override to test an engine change early
         required: false
         type: string
         default: main
@@ -47,11 +47,10 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v7
         with:
-          repository: mark-brannan/claude
-          ref: ${{ inputs.claude-ref }}
+          repository: mark-brannan/.github
+          ref: ${{ inputs.shared-ref }}
           sparse-checkout: |
-            /bin/complexity
-            /lib/gitrun.py
+            /.github/scripts/complexity.py
           sparse-checkout-cone-mode: false
           path: .complexity-engine
           persist-credentials: false
@@ -69,8 +68,8 @@ jobs:
       - name: complexity
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
-          CLAUDE_REF: ${{ inputs.claude-ref }}
+          SHARED_REF: ${{ inputs.shared-ref }}
         run: |
           set -euo pipefail
-          echo "engine: claude ref $CLAUDE_REF · lizard $(lizard --version) · shellmetrics $SHELLMETRICS_COMMIT"
-          python3 .complexity-engine/bin/complexity --base "$BASE" --require-tools | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "engine: .github ref $SHARED_REF · lizard $(lizard --version) · shellmetrics $SHELLMETRICS_COMMIT"
+          python3 .complexity-engine/.github/scripts/complexity.py --base "$BASE" --require-tools | tee -a "$GITHUB_STEP_SUMMARY"

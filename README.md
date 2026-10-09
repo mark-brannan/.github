@@ -10,7 +10,7 @@ workflows; the substance lives here, once.
 | `.github/workflows/ci-gate.yml` | `uses: mark-brannan/.github/.github/workflows/ci-gate.yml@main` from a job named `ci-gate` |
 | `.github/workflows/claude-review.yml` | `uses: mark-brannan/.github/.github/workflows/claude-review.yml@main` |
 | `.github/workflows/nonempty-diff.yml` | `uses: mark-brannan/.github/.github/workflows/nonempty-diff.yml@main`; fails an empty PR and any PR that adds a line starting with a tab; files exempt from the tab check are listed in `.github/config/no-tabs-allowlist.txt` |
-| `.github/workflows/complexity.yml` | `uses: mark-brannan/.github/.github/workflows/complexity.yml@main`, outside `ci-gate`'s needs; reports each touched function's cyclomatic complexity change to the job summary, never fails; the engine is `complexity` in `mark-brannan/claude` (`bin/`) |
+| `.github/workflows/complexity.yml` | `uses: mark-brannan/.github/.github/workflows/complexity.yml@main`, outside `ci-gate`'s needs; reports each touched function's cyclomatic complexity change to the job summary, never fails; the engine is `.github/scripts/complexity.py` here |
 | `.github/workflows/prose-budget.yml` | `uses: mark-brannan/.github/.github/workflows/prose-budget.yml@main`; the engine is `prose-budget` in `mark-brannan/claude` (`bin/`), the config is the repository's `docs/budgets.json` or `.prose-budgets.json` |
 | `.github/actions/npm-test-prose-fallback` | `uses: mark-brannan/.github/.github/actions/npm-test-prose-fallback@main` from an `npm test` step, on a runner with no `prose-budget` engine; pair with the `prose-budget` job above, which is the real gate |
 

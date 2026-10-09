@@ -52,10 +52,28 @@ jobs:
       contents: read
     uses: ./.github/workflows/secret-scan.yml
 
+  # The complexity engine's suite, with stub tools; seconds.
+  complexity-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: python3 .github/scripts/complexity.test.py
+
+  # The workflow run on this repo's own PRs against the engine they carry. A
+  # measurement, so it stays out of ci-gate's needs; ~10 s per push.
+  complexity:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/complexity.yml
+    with:
+      shared-ref: ${{ github.event.pull_request.head.sha }}
+
   # The single required status check. `always()` lets it evaluate when a
   # dependency failed or was skipped instead of inheriting the skip.
   ci-gate:
-    needs: [nonempty, secret-scan]
+    needs: [nonempty, secret-scan, complexity-tests]
     if: always()
     permissions: {}
     uses: ./.github/workflows/ci-gate.yml
