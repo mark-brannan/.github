@@ -270,12 +270,19 @@ jobs:
       # runner (leftover from a previous job) can mask it, which is why this
       # was intermittent rather than always-red.
       # https://github.com/anthropics/claude-code-action/issues/1817
+      #
+      # The guards come as the languette plugin. The seeded settings.json
+      # enables it, but enabling installs nothing: a headless run on a bare
+      # runner has no plugin cache, so the action installs it here.
       - if: steps.seen.outputs.cache-hit != 'true' && steps.tok.outputs.present == 'true'
+        id: review
         uses: anthropics/claude-code-action@6c690188da61cf16ee7debb28383ba67f02abb4c # v1.0.242
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
           allowed_bots: ${{ inputs.allowed-bots }}
+          plugin_marketplaces: ${{ inputs.seed-home && 'https://github.com/mark-brannan/languette.git' || '' }}
+          plugins: ${{ inputs.seed-home && 'languette@languette' || '' }}
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
@@ -300,6 +307,21 @@ jobs:
           claude_args: |
             --model "${{ inputs.model }}"
             --allowedTools "${{ inputs.allowed-tools }},Read(.writing-rubric.md)"
+
+      # Proof the guards were live, read from the session's own init message
+      # rather than from what the install step claimed. Checked after the run
+      # because the claude binary that loads plugins only exists once the
+      # action has installed it.
+      - if: inputs.seed-home && steps.review.outputs.execution_file != ''
+        name: Verify the languette plugin loaded
+        env:
+          EXEC: ${{ steps.review.outputs.execution_file }}
+        run: |
+          if jq -e '[.[] | select(.type == "system" and .subtype == "init") | .plugins[]?.name] | index("languette")' "$EXEC" >/dev/null; then
+            echo "languette plugin loaded; the review ran under its guards"
+          else
+            echo "::warning::languette plugin did not load -- this review ran without its guards"
+          fi
 
       - if: steps.seen.outputs.cache-hit != 'true' && steps.tok.outputs.present == 'true'
         name: Confirm a review comment actually landed
