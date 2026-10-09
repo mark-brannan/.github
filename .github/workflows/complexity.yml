@@ -11,8 +11,14 @@ name: complexity
 # extension or shebang -- lizard for Python, JS/TS, Go, Rust and the rest it
 # knows, shellmetrics for sh/bash -- so a mixed repo needs no configuration.
 #
+# rust-code-analysis also reads the files lizard handles, adding cognitive
+# complexity, Halstead measures and the maintainability index. The summary
+# shows cyclomatic and cognitive; every metric per function goes in the
+# `complexity` artifact (complexity.json, kept 90 days), logged, never weighted.
+#
 # The tools are third-party, so they are pinned: lizard by version,
-# shellmetrics (a single script) by commit and checksum.
+# shellmetrics (a single script) by commit and checksum, rust-code-analysis
+# (a release binary) by version and checksum.
 #
 #     jobs:
 #       complexity:
@@ -33,6 +39,8 @@ env:
   LIZARD_VERSION: 1.24.1
   SHELLMETRICS_COMMIT: b3bfff2af6880443112cdbf2ea449440b30ab9b0
   SHELLMETRICS_SHA256: 1aab5caf551811a506f11e569a1c4cf00ddd960d9212428531efb075f45d0a5d
+  RCA_VERSION: v0.0.25
+  RCA_SHA256: 9ec2a217b8ff191e02dab5d5f2eee6158b63fd975c532b2c5d67c2e6c7249894
 
 jobs:
   complexity:
@@ -54,7 +62,7 @@ jobs:
           sparse-checkout-cone-mode: false
           path: .complexity-engine
           persist-credentials: false
-      - name: Install lizard and shellmetrics
+      - name: Install lizard, shellmetrics and rust-code-analysis
         run: |
           set -euo pipefail
           python3 -m pip install -q "lizard==$LIZARD_VERSION"
@@ -64,6 +72,10 @@ jobs:
             -o "$tools/shellmetrics"
           echo "$SHELLMETRICS_SHA256  $tools/shellmetrics" | sha256sum -c -
           chmod +x "$tools/shellmetrics"
+          curl -fsSL "https://github.com/mozilla/rust-code-analysis/releases/download/$RCA_VERSION/rust-code-analysis-linux-cli-x86_64.tar.gz" \
+            -o "$tools/rca.tar.gz"
+          echo "$RCA_SHA256  $tools/rca.tar.gz" | sha256sum -c -
+          tar -xzf "$tools/rca.tar.gz" -C "$tools" rust-code-analysis-cli
           echo "$tools" >> "$GITHUB_PATH"
       - name: complexity
         env:
@@ -71,5 +83,14 @@ jobs:
           SHARED_REF: ${{ inputs.shared-ref }}
         run: |
           set -euo pipefail
-          echo "engine: .github ref $SHARED_REF · lizard $(lizard --version) · shellmetrics $SHELLMETRICS_COMMIT"
-          python3 .complexity-engine/.github/scripts/complexity.py --base "$BASE" --require-tools | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "engine: .github ref $SHARED_REF · lizard $(lizard --version) · shellmetrics $SHELLMETRICS_COMMIT · rust-code-analysis $RCA_VERSION"
+          python3 .complexity-engine/.github/scripts/complexity.py --base "$BASE" --require-tools \
+            --json "$RUNNER_TEMP/complexity.json" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload every metric
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: complexity
+          path: ${{ runner.temp }}/complexity.json
+          if-no-files-found: ignore
+          retention-days: 90
