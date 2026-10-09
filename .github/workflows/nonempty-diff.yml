@@ -12,6 +12,13 @@ name: nonempty-diff
 # original inline .github/workflows/nonempty-diff.yml. Callers list it in
 # their ci-gate `needs`, so it costs no ruleset entry; on a non-PR run (push
 # to main) there is no base to diff against and it passes with a note.
+#
+# A second step fails when a line the PR adds starts with a tab. Existing
+# tabs never fail it, only added ones. Files on the allowlist
+# (.github/config/no-tabs-allowlist.txt: Makefile, *.mk, *.go ...) are
+# exempt. The script and the allowlist live in this repository, not the
+# caller's, so the step fetches them (same mechanism as prose-budget.yml);
+# a caller changes nothing. Edit the allowlist here to exempt a file type.
 
 on:
   workflow_call:
@@ -32,6 +39,21 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # The checkout above is the CALLER's repo; the tab check and its
+      # allowlist are in this one. Fixed to main, like secret-scan.yml, so no
+      # caller input picks the code this step runs. This repository's own
+      # runs skip the fetch and use the PR's copy from the first checkout.
+      - if: github.repository != 'mark-brannan/.github'
+        uses: actions/checkout@v7
+        with:
+          repository: mark-brannan/.github
+          ref: main
+          sparse-checkout: |
+            /.github/scripts/no-tabs.sh
+            /.github/config/no-tabs-allowlist.txt
+          sparse-checkout-cone-mode: false
+          path: .nonempty-diff-shared
+          persist-credentials: false
       - name: The PR changes something relative to its base
         env:
           BASE: ${{ inputs.base-ref || github.event.pull_request.base.ref }}
@@ -47,3 +69,17 @@ jobs:
             exit 1
           fi
           echo "ok: $(git diff --shortstat "$(git merge-base "origin/$BASE" HEAD)" HEAD)"
+      - name: The PR adds no line that starts with a tab
+        env:
+          BASE: ${{ inputs.base-ref || github.event.pull_request.base.ref }}
+          SHARED: ${{ github.repository == 'mark-brannan/.github' && '.' || '.nonempty-diff-shared' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BASE" ]; then
+            echo "not a pull request: nothing to compare"
+            exit 0
+          fi
+          git fetch -q origin "$BASE"
+          bash "$SHARED/.github/scripts/no-tabs.sh" \
+            "$(git merge-base "origin/$BASE" HEAD)" \
+            "$SHARED/.github/config/no-tabs-allowlist.txt"
