@@ -27,11 +27,6 @@ on:
         description: "Override for the PR base ref; defaults to the triggering PR's base"
         required: false
         type: string
-      shared-ref:
-        description: "Ref of mark-brannan/.github to fetch the tab check and its allowlist from; defaults to main"
-        required: false
-        type: string
-        default: main
 
 permissions:
   contents: read
@@ -45,11 +40,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       # The checkout above is the CALLER's repo; the tab check and its
-      # allowlist are in this one.
-      - uses: actions/checkout@v7
+      # allowlist are in this one. Fixed to main, like secret-scan.yml, so no
+      # caller input picks the code this step runs. This repository's own
+      # runs skip the fetch and use the PR's copy from the first checkout.
+      - if: github.repository != 'mark-brannan/.github'
+        uses: actions/checkout@v7
         with:
           repository: mark-brannan/.github
-          ref: ${{ inputs.shared-ref }}
+          ref: main
           sparse-checkout: |
             /.github/scripts/no-tabs.sh
             /.github/config/no-tabs-allowlist.txt
@@ -74,6 +72,7 @@ jobs:
       - name: The PR adds no line that starts with a tab
         env:
           BASE: ${{ inputs.base-ref || github.event.pull_request.base.ref }}
+          SHARED: ${{ github.repository == 'mark-brannan/.github' && '.' || '.nonempty-diff-shared' }}
         run: |
           set -euo pipefail
           if [ -z "$BASE" ]; then
@@ -81,6 +80,6 @@ jobs:
             exit 0
           fi
           git fetch -q origin "$BASE"
-          bash .nonempty-diff-shared/.github/scripts/no-tabs.sh \
+          bash "$SHARED/.github/scripts/no-tabs.sh" \
             "$(git merge-base "origin/$BASE" HEAD)" \
-            .nonempty-diff-shared/.github/config/no-tabs-allowlist.txt
+            "$SHARED/.github/config/no-tabs-allowlist.txt"

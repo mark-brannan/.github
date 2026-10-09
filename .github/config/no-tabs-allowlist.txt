@@ -8,3 +8,8 @@ makefile
 GNUmakefile
 *.mk
 *.go
+# Tool-written files: git and the Go tools rewrite these with tabs.
+.gitmodules
+.gitconfig*
+go.mod
+go.work
