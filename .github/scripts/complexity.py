@@ -224,26 +224,28 @@ def details(rs, dash, cell):
 
 def markdown(report):
     rs, n = report["functions"], len(report["functions"])
-    lines = ["## Complexity: %+d across %d function%s" % (report["delta"], n, "" if n == 1 else "s"), ""]
+    dash = lambda v: "—" if v is None else str(v)
+    # Paths and names come from the PR, so nothing in them may close the cell.
+    cell = lambda v: "".join(c for c in v if c not in "`|<>\r\n")[:120]
+    span = lambda b, a: "%s → %s" % (dash(b), dash(a))
     if rs:
-        lines += ["| Function | Before | After | Δ | Cognitive |", "|---|---:|---:|---:|---:|"]
-        dash = lambda v: "—" if v is None else str(v)
-        # Paths and names come from the PR, so nothing in them may close the cell.
-        cell = lambda v: "".join(c for c in v if c not in "`|<>\r\n")[:120]
+        lines = ["### Complexity: %+d across %d function%s" % (report["delta"], n, "" if n == 1 else "s"), "",
+                 "| File | Function | Cyclomatic | Δ | Cognitive |", "|---|---|:---:|---:|:---:|"]
         for r in rs[:ROWS]:
             c = r["cognitive"]
-            lines.append("| `%s` · `%s` (line %d) | %s | %s | %+d | %s → %s |" % (
-                cell(r["path"]), cell(r["function"]), r["line"], dash(r["before"]), dash(r["after"]), r["delta"],
-                dash(c["before"]), dash(c["after"])))
+            lines.append("| `%s:%d` | `%s` | %s | %+d | %s |" % (
+                cell(r["path"]), r["line"], cell(r["function"]), span(r["before"], r["after"]), r["delta"],
+                span(c["before"], c["after"])))
         if n > ROWS:
             lines.append("| …and %d more, smaller changes | | | | |" % (n - ROWS))
         lines += details(rs, dash, cell)
     else:
-        lines.append("No function's complexity changed.")
+        lines = ["### Complexity: no change"]
     for name, count in sorted(report["unmeasured"].items()):
         lines += ["", "**%s not found:** %d changed file%s not measured." % (name, count, "" if count == 1 else "s")]
-    lines += ["", "Measured %d changed file%s against %s; cyclomatic and cognitive complexity per function, a measurement, not a gate. "
-              "`--json` carries every metric." % (report["files"], "" if report["files"] == 1 else "s", report["base"][:12])]
+    measured = "Measured %d changed file%s, %s against %s." % (
+        report["files"], "" if report["files"] == 1 else "s", report["head"][:7], report["base"][:7])
+    lines += ["", measured + (" A measurement, not a gate." if rs else " No function's complexity moved.")]
     return "\n".join(lines) + "\n"
 
 
