@@ -6,7 +6,7 @@ name: complexity
 # callers leave this job out of ci-gate's needs.
 #
 # The engine is .github/scripts/complexity.py in this repository (stdlib
-# Python); this workflow fetches it, installs the two tools it drives and runs
+# Python); this workflow fetches it, installs the three tools it drives and runs
 # it, the same mechanism as nonempty-diff.yml. It routes each changed file by
 # extension or shebang -- lizard for Python, JS/TS, Go, Rust and the rest it
 # knows, shellmetrics for sh/bash -- so a mixed repo needs no configuration.
