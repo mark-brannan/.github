@@ -7,9 +7,10 @@ name: pr-title
 # more -- it does not choose among areas, and it does not require
 # conventional-commit types, though it accepts one with a scope
 # ("fix(schema): ...", release-please's "chore(main): release 1.2.0").
-# Which shape the fleet enforces is the user's ruling
-# (claude_prompts_scratch card 17913674070dd05771); change PATTERN below to
-# follow it.
+# A repo that releases with release-please passes `conventional: true`:
+# release-please reads only conventional types, so an `area: summary` title
+# never reaches a release. There the area moves into the scope:
+# "fix(doctor): ...".
 #
 # Reusable, like nonempty-diff: callers list it in their ci-gate `needs`, so
 # it costs no ruleset entry. Cost: one job of seconds per PR event. Callers
@@ -23,6 +24,13 @@ name: pr-title
 
 on:
   workflow_call:
+    inputs:
+      conventional:
+        description: >-
+          Require a conventional-commit type, `type(area): summary`, as
+          release-please reads them.
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -30,7 +38,7 @@ jobs:
   title:
     runs-on: ubuntu-latest
     steps:
-      - name: "The title reads `area: summary`"
+      - name: The title has the repo's shape
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -40,6 +48,9 @@ jobs:
           # area: lowercase word, may hold . / _ - ; an optional (scope) and
           # !; then a colon, a space and a summary
           PATTERN: '^[a-z][a-z0-9._/-]*(\([^)]+\))?!?: [^ ].*$'
+          # a type release-please knows, then an optional (area)
+          CONVENTIONAL: '^(feat|fix|perf|revert|docs|deps|chore|ci|test|build|refactor|style)(\([^)]+\))?!?: [^ ].*$'
+          USE_CONVENTIONAL: ${{ inputs.conventional }}
         run: |
           set -euo pipefail
           if [ -z "$NUMBER" ]; then
@@ -56,8 +67,13 @@ jobs:
             echo "::warning::could not read the live title; checking the event's copy, which a re-run does not refresh"
             TITLE=$EVENT_TITLE
           fi
+          SHAPE='`area: summary` (for example "settings: deny the Mergify stack skill")'
+          if [ "$USE_CONVENTIONAL" = true ]; then
+            PATTERN=$CONVENTIONAL
+            SHAPE='`type(area): summary` (for example "fix(doctor): the version row sits under Claude Code")'
+          fi
           if [[ ! "$TITLE" =~ $PATTERN ]]; then
-            echo "::error::title \"$TITLE\" is not \`area: summary\` (for example \"settings: deny the Mergify stack skill\"). Edit the title, then re-run this job."
+            echo "::error::title \"$TITLE\" is not $SHAPE. Edit the title, then re-run this job."
             exit 1
           fi
           echo "ok: $TITLE"
