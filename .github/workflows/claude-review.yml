@@ -200,7 +200,7 @@ jobs:
             exit 0
           fi
           if [ "$SEED_COMPLETE" = "true" ]; then
-            echo "note=\$HOME seeded from mark-brannan/claude (the claude-config action reports a complete install); Bash calls should run normally" >> "$GITHUB_OUTPUT"
+            echo "note=\$HOME seeded from mark-brannan/claude (the claude-config action reports a complete install: settings.json landed)" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::Claude config seeding reported incomplete -- this review will run degraded"
             echo "note=\$HOME seeding was incomplete -- Bash calls may be denied fail-closed or may run unguarded; say so plainly in your summary comment" >> "$GITHUB_OUTPUT"
