@@ -32,3 +32,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261013t220650z
 - claude-review triage thresholds 10/50/800 lines, budget pause at 90 percent, deep model claude-opus-5-5 at --effort high Undo: change the workflow input defaults ([#69](https://github.com/mark-brannan/.github/pull/69))
+
+### 20261013t220706z
+- claude-review budget probe fails open: an unanswered probe lets the review run Undo: exit 1 on an empty probe ([#69](https://github.com/mark-brannan/.github/pull/69))
