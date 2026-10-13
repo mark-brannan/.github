@@ -38,3 +38,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261013t220746z
 - claude-review triage puts a diff touching only the mixed-loops design set (CLAUDE.md, .claude/rules, ADRs, decisions) in the skip tier Undo: remove the design arm from the triage decision ([#69](https://github.com/mark-brannan/.github/pull/69))
+
+### 20261013t232107z
+- a failed comment count leaves the cap unenforced for that run but blocks auto-escalation Undo: treat a failed count as 0 (or as at-cap) ([#69](https://github.com/mark-brannan/.github/pull/69))
