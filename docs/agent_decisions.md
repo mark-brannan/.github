@@ -53,3 +53,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261013t234251z
 - review-metrics reads a reply as saying fixed by a word list: fixed, done, addressed, applied, resolved in, a sha Undo: edit the FIXED word list ([#71](https://github.com/mark-brannan/.github/pull/71))
+
+### 20261013t234335z
+- review-metrics reads a reply as disagreeing, or marking a reversal, by a word list: no, not, won't, disagree, by design, intended, keep/kept, reversal/reversed, out of scope, stays Undo: edit the DECLINED word list ([#71](https://github.com/mark-brannan/.github/pull/71))
