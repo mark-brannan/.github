@@ -86,7 +86,7 @@ def shebang_suffix(head):
 def skipped(path):
     parts = path.split("/")
     return (os.path.splitext(path)[1].lower() in SKIP_EXT or parts[-1] in SKIP_NAME
-            or any(p in SKIP_DIR for p in parts[:-1]))
+            or parts[-1].endswith(".min.js") or any(p in SKIP_DIR for p in parts[:-1]))
 
 
 def materialize(root, rev, dest):
@@ -95,7 +95,9 @@ def materialize(root, rev, dest):
     text of its own, so both are left out."""
     files = {}
     with tarfile.open(fileobj=io.BytesIO(git("archive", "--format=tar", rev, root=root))) as tar:
-        for m in tar:
+        members = tar.getmembers()
+        real = {m.name for m in members}
+        for m in members:
             if not m.isfile() or skipped(m.name):
                 continue
             blob = tar.extractfile(m).read()
@@ -104,11 +106,11 @@ def materialize(root, rev, dest):
             name = m.name
             if not os.path.splitext(name)[1]:
                 ext = shebang_suffix(blob[:200])
-                if ext:
+                # `run` beside a real `run.py` keeps its own name: the literal
+                # check still reads it, jscpd does not.
+                if ext and name + ext not in real:
                     name += ext
             out = os.path.join(dest, name)
-            if os.path.exists(out):  # `run` beside a real `run.py`: the real one keeps the name
-                continue
             os.makedirs(os.path.dirname(out), exist_ok=True)
             with open(out, "wb") as f:
                 f.write(blob)

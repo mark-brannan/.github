@@ -129,6 +129,24 @@ class Duplication(unittest.TestCase):
         self.assertIn("c.py", head)  # unchanged, still scanned
         self.assertIn("tool.py", head)
 
+    def test_script_beside_its_suffixed_name(self):
+        # git archive lists `run` before `run.py`; the real run.py keeps its name.
+        self.write({"run": "#!/usr/bin/env python3\nDUP run\n", "run.py": "DUP real\n", "real2.py": "DUP real\n"})
+        git(self.repo, "add", "run", "run.py", "real2.py")
+        git(self.repo, "commit", "-qm", "run")
+        _, rep = self.run_tool()
+        pairs = [sorted(c["path"] for c in n["copies"]) for n in rep["new_clones"]]
+        self.assertIn(["real2.py", "run.py"], pairs)
+        self.assertIn(" run ", self.log.read_text().splitlines()[-1] + " ")
+
+    def test_minified_is_not_read(self):
+        lit = '"a long string that a bundle repeats"\n'
+        self.write({"x.min.js": lit, "y.min.js": lit})
+        git(self.repo, "add", "x.min.js", "y.min.js")
+        git(self.repo, "commit", "-qm", "min")
+        _, rep = self.run_tool()
+        self.assertNotIn("a long string that a bundle repeats", {r["literal"] for r in rep["new_literals"]})
+
     def test_missing_jscpd(self):
         p, rep = self.run_tool(jscpd=False)
         self.assertEqual(p.returncode, 0, p.stderr)

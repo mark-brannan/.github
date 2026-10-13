@@ -48,7 +48,7 @@ jobs:
   duplication:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
-    timeout-minutes: 5
+    timeout-minutes: 2  # 9 s measured on this repo (#66); a scan past 2 min is a signal
     steps:
       - uses: actions/checkout@v7
         with:
