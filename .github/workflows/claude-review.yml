@@ -66,8 +66,15 @@ name: Claude PR Review
 #            actions, Mergify, CODEOWNERS, hooks, settings, Dockerfiles); a diff over
 #            `deep-over-lines`. Runs on `deep-model` with `--effort deep-effort`.
 #            Escalation is paid once per pull request: once any review of it
-#            is on record, a later push escalated by path or size runs at
-#            default. Only the `review:deep` label escalates every time.
+#            is on record (a recorded fingerprint, or any comment from the
+#            bot), a later push escalated by path or size runs at default.
+#            Only the `review:deep` label escalates every time.
+#
+# Whatever the tier, a pull request gets at most `max-reviews` runs, counted
+# by the bot's comments on it; past that every push is skipped as `cap`, the
+# `review:deep` label included. A count that fails leaves the cap unenforced
+# for that run but still treats the pull request as already reviewed, so it
+# cannot escalate.
 #
 # Then, with the token in hand, a budget probe asks the plan's usage endpoint
 # how much of each rate window is used. Past `budget-pause-at` percent on any
@@ -161,7 +168,12 @@ on:
         description: Percent of any plan rate window (5-hour, 7-day, per-model) at or past which the review is skipped; 100 disables
         required: false
         type: number
-        default: 90
+        default: 75
+      max-reviews:
+        description: Reviews the bot runs on one pull request, counted by its comments there; past this every later push is skipped, the review:deep label included; 0 disables
+        required: false
+        type: number
+        default: 4
       allowed-bots:
         description: Bot logins whose pull requests are reviewed anyway (the action refuses non-human actors by default). Overriding replaces this default, so include mergify[bot] and mark-brannan-release-please[bot] in the override too.
         required: false
@@ -280,6 +292,7 @@ jobs:
           DOCS_SKIP: ${{ inputs.docs-skip-lines }}
           DEEP_OVER: ${{ inputs.deep-over-lines }}
           PRIOR: ${{ steps.seen.outputs.cache-matched-key }}
+          MAX_REVIEWS: ${{ inputs.max-reviews }}
         run: |
           set -euo pipefail
           # Labels are read live, not from the event: no create call (REST or
@@ -289,6 +302,10 @@ jobs:
           # it, then marks it ready: `ready_for_review` carries the labels.
           LABELS=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name] | join(" ")') \
             || LABELS=$PAYLOAD_LABELS
+          # The bot's comments on this PR: one per review run, plus any reply
+          # to an @claude mention, so the count errs toward fewer reviews.
+          reviews=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                      --jq '.[] | select(.user.login == "claude[bot]") | .id' | wc -l) || reviews=unknown
           mb=$(git merge-base "origin/$BASE" HEAD)
           files=0 lock=0 design=0 docs=0 risky=0 code=0 lines=0
           while IFS=$'\t' read -r add del f; do
@@ -339,9 +356,12 @@ jobs:
             elif [ "$lines" -gt "$DEEP_OVER" ]; then
               decision=deep reason="$lines changed lines (more than $DEEP_OVER)"
             fi
-            if [ "$decision" = deep ] && [ -n "${PRIOR:-}" ]; then
-              decision=default reason="$reason; this PR already had a review, so a follow-up runs at default"
+            if [ "$decision" = deep ] && { [ -n "${PRIOR:-}" ] || [ "$reviews" != 0 ]; }; then
+              decision=default reason="$reason; this PR already had a review (or its count failed), so a follow-up runs at default"
             fi
+          fi
+          if [ "$decision" != skip ] && [ "$reviews" != unknown ] && [ "$MAX_REVIEWS" -gt 0 ] && [ "$reviews" -ge "$MAX_REVIEWS" ]; then
+            decision=skip reason="cap: $reviews reviews already on this PR (at most $MAX_REVIEWS)"
           fi
 
           model=$DEFAULT_MODEL effort_arg=
@@ -356,6 +376,7 @@ jobs:
             echo "effort-arg=$effort_arg"
             echo "lines=$lines"
             echo "files=$files"
+            echo "reviews=$reviews"
             echo "classes=lock=$lock design=$design docs=$docs risky=$risky code=$code"
           } >> "$GITHUB_OUTPUT"
           echo "::notice::review triage: $decision ($reason)"
@@ -415,6 +436,7 @@ jobs:
           LINES: ${{ steps.triage.outputs.lines }}
           FILES: ${{ steps.triage.outputs.files }}
           CLASSES: ${{ steps.triage.outputs.classes }}
+          REVIEWS: ${{ steps.triage.outputs.reviews }}
           SEEN: ${{ steps.seen.outputs.cache-hit }}
           TOKEN_PRESENT: ${{ steps.tok.outputs.present }}
           USED: ${{ steps.budget.outputs.used }}
@@ -437,6 +459,7 @@ jobs:
             echo "| tier | $DECISION ($REASON) |"
             echo "| model | ${MODEL:-} ${EFFORT:-} |"
             echo "| diff | $LINES lines in $FILES files; $CLASSES |"
+            echo "| reviews so far | $REVIEWS |"
             echo "| plan usage | $usage |"
           } >> "$GITHUB_STEP_SUMMARY"
       # The fail-closed PreToolUse hooks deny every Bash call unless they
