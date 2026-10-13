@@ -249,7 +249,9 @@ jobs:
         id: triage
         env:
           BASE: ${{ github.event.pull_request.base.ref }}
-          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+          PAYLOAD_LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+          PR: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
           DEFAULT_MODEL: ${{ inputs.model }}
           DEEP_MODEL: ${{ inputs.deep-model }}
@@ -259,6 +261,13 @@ jobs:
           DEEP_OVER: ${{ inputs.deep-over-lines }}
         run: |
           set -euo pipefail
+          # Labels are read live, not from the event: no create call (REST or
+          # GraphQL) accepts labels, so `gh pr create --label review:skip`
+          # adds them a moment after `opened` fires and that payload has none.
+          # A fan-out that must never race opens each PR as a draft, labels
+          # it, then marks it ready: `ready_for_review` carries the labels.
+          LABELS=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name] | join(" ")') \
+            || LABELS=$PAYLOAD_LABELS
           mb=$(git merge-base "origin/$BASE" HEAD)
           files=0 lock=0 design=0 docs=0 risky=0 code=0 lines=0
           while IFS=$'\t' read -r add del f; do
