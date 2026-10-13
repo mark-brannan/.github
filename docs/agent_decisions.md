@@ -23,3 +23,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261013t202840z
 - a repeated literal is a quoted string (double, single or backtick, optional r/b/u/f prefix) whose opening quote is not glued to a word Undo: edit LITERAL in duplication.py ([#66](https://github.com/mark-brannan/.github/pull/66))
+
+### 20261013t202850z
+- jscpd is installed with --ignore-scripts Undo: drop --ignore-scripts in duplication.yml ([#66](https://github.com/mark-brannan/.github/pull/66))
