@@ -80,6 +80,8 @@ class Classify(unittest.TestCase):
             (thread("off by one", resolved=True, outdated=True), "MERGED", "fixed"),
             (thread("off by one", [("solace", "Fixed in abc1234")], resolved=True), "MERGED", "fixed"),
             (thread("off by one", [("solace", "No: the bound is inclusive")], resolved=True), "MERGED", "declined"),
+            (thread("off by one", [("solace", "Reversal: kept, thread open")], resolved=True), "MERGED", "declined"),
+            (thread("off by one", [("solace", "Thanks")], resolved=True), "MERGED", "other"),
             (thread("off by one", [(rm.BOT, "still applies")], resolved=True), "MERGED", "other"),
             (thread("off by one", resolved=True), "MERGED", "other"),
             (thread("off by one", outdated=True), "MERGED", "other"),
@@ -103,6 +105,14 @@ class Charge(unittest.TestCase):
                 {"ran": True, "started": "2026-10-05T00:00:00Z", "run": 4}]
         self.assertEqual(rm.charge(runs, {"at": "2026-10-04T00:00:00Z"})["run"], 3)
         self.assertIsNone(rm.charge(runs, {"at": "2026-09-30T00:00:00Z"}))
+
+
+class Markdown(unittest.TestCase):
+    def test_a_run_counts_in_each_path_class(self):
+        run = {"repo": "o/a", "pr": 1, "ran": True, "cost": 0.2, "model": "m", "tier": "deep", "paths": "docs+risky"}
+        md = rm.markdown([run], [], "2026-09-13")
+        self.assertIn("| docs | 1 | $0.20 |", md)
+        self.assertIn("| risky | 1 | $0.20 |", md)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,8 @@
 #   judgment  the first comment opens "Judgment (": it went to a human
 #   fixed     resolved, and a later commit changed the anchored lines (the
 #             thread is outdated) or a reply says fixed
-#   declined  resolved, lines unchanged, with a human reply
+#   declined  resolved, lines unchanged, with a reply that disagrees or marks
+#             a reversal
 #   ignored   unresolved and never answered, on a merged pull request
 #   open      unresolved on an open pull request
 #   other     resolved silently with the lines unchanged; outdated and
@@ -53,6 +54,8 @@ TRIAGE = re.compile(r"^##\[notice\]review triage: (skip|default|deep) \((.*)\)\s
 EFFORT = re.compile(r"^\s+claude_args: .*--effort\s+([a-z]+)")
 CLASSES = re.compile(r"^\s+CLASSES: ((?:[a-z]+=\d+ ?)+)$")
 FIXED = re.compile(r"\b(fixed|done|addressed|applied|resolved in|in [0-9a-f]{7,40})\b", re.I)
+DECLINED = re.compile(r"\b(no|not|won't|wontfix|disagree|by design|intended|intentional|keep(ing)?|kept|"
+                      r"revers(al|ed)|out of scope|stays?)\b", re.I)
 JUDGMENT = re.compile(r"^\W*judgment\s*\(", re.I)
 
 
@@ -127,7 +130,7 @@ def classify(thread, pr_state):
     if thread["resolved"]:
         if thread["outdated"] or said_fixed:
             return "fixed"
-        return "declined" if replies else "other"
+        return "declined" if any(DECLINED.search(c["body"]) for c in replies) else "other"
     if thread["outdated"]:
         return "other"
     if pr_state == "OPEN":
@@ -232,14 +235,15 @@ def money(x):
 
 
 def table(title, key, runs, ths):
-    by = "by_" + title.replace(" ", "_")
-    groups = sorted({key(r) for r in runs if r["ran"]} | {t[by] for t in ths})
+    # key gives a run's or a thread's groups (a thread carries its run's
+    # model, tier and paths); one in several path classes counts in each.
+    groups = sorted({g for r in runs if r["ran"] for g in key(r)} | {g for t in ths for g in key(t)})
     out = ["", "### By %s" % title, "",
            "| %s | runs | spend | per run | threads | fixed | declined | ignored | judgment | per fixed |" % title,
            "|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|"]
     for g in groups:
-        rs = [r for r in runs if r["ran"] and key(r) == g]
-        ts = [t for t in ths if t[by] == g]
+        rs = [r for r in runs if r["ran"] and g in key(r)]
+        ts = [t for t in ths if g in key(t)]
         spend = sum(r["cost"] or 0 for r in rs)
         n = defaultdict(int)
         for t in ts:
@@ -265,10 +269,11 @@ def markdown(runs, ths, since):
            "Per fixed thread: %s." % (money(spend / n["fixed"]) if n["fixed"] else "no fixed threads"),
            "Reactions on the bot's first comments: %d 👍, %d 👎." % (
                sum(t["up"] for t in ths), sum(t["down"] for t in ths))]
-    out += table("model", lambda r: r["model"], runs, ths)
-    out += table("tier", lambda r: r["tier"] or "pre-triage", runs, ths)
-    out += table("path class", lambda r: r["paths"] or "pre-triage", runs, ths)
-    out += table("repo", lambda r: r["repo"], runs, ths)
+    out += table("model", lambda r: [r["model"]], runs, ths)
+    out += table("tier", lambda r: [r["tier"] or "pre-triage"], runs, ths)
+    out += table("path class", lambda r: (r["paths"] or "pre-triage").split("+"), runs, ths)
+    out += ["", "A pull request touching several path classes counts in each, so that table sums past the total."]
+    out += table("repo", lambda r: [r["repo"]], runs, ths)
     skipped = defaultdict(int)
     for r in runs:
         if not r["ran"]:
@@ -321,8 +326,8 @@ def main():
                 r = charge(prs, t) or {}
                 ths.append({"repo": repo, "pr": pr, "path": t["path"], "at": t["at"],
                             "class": classify(t, state), "run": r.get("run", ""),
-                            "by_model": r.get("model", ""), "by_tier": r.get("tier", "") or "pre-triage",
-                            "by_path_class": r.get("paths", "") or "pre-triage", "by_repo": repo,
+                            "model": r.get("model", ""), "tier": r.get("tier", "") or "pre-triage",
+                            "paths": r.get("paths", "") or "pre-triage",
                             "up": t["comments"][0].get("reactions", {}).get("THUMBS_UP", 0),
                             "down": t["comments"][0].get("reactions", {}).get("THUMBS_DOWN", 0),
                             "first_line": (t["comments"][0]["body"].splitlines() or [""])[0][:120]})
@@ -331,8 +336,8 @@ def main():
         write_csv(a.csv, runs, ["repo", "pr", "run", "job", "conclusion", "started", "ended", "ran", "model",
                                 "effort", "tier", "why", "paths", "cost", "turns", "ms"])
     if a.threads_csv:
-        write_csv(a.threads_csv, ths, ["repo", "pr", "run", "at", "class", "by_model", "by_tier",
-                                       "by_path_class", "path", "up", "down", "first_line"])
+        write_csv(a.threads_csv, ths, ["repo", "pr", "run", "at", "class", "model", "tier", "paths", "path",
+                                       "up", "down", "first_line"])
 
 
 if __name__ == "__main__":
