@@ -50,3 +50,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261013t234233z
 - review-metrics counts a resolved, outdated thread as fixed; a rebase that moves the lines also marks it Undo: drop isOutdated from the fixed test ([#71](https://github.com/mark-brannan/.github/pull/71))
+
+### 20261013t234251z
+- review-metrics reads a reply as saying fixed by a word list: fixed, done, addressed, applied, resolved in, a sha Undo: edit the FIXED word list ([#71](https://github.com/mark-brannan/.github/pull/71))
