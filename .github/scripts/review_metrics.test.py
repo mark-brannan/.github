@@ -3,8 +3,9 @@
 #
 # What matters: a job log yields the model from the init message, the cost,
 # turns and wall time from the result message, and the tier from the triage
-# notice, with the timestamps GitHub prefixes stripped; the triage script's
-# own source, echoed into the log, is not mistaken for a decision; a log with
+# notice and the path classes from the gate step's env, with the timestamps
+# GitHub prefixes stripped; the triage script's own source and the PR body,
+# both echoed into the log, are not mistaken for a decision; a log with
 # no result message is a run that spent nothing; each bot thread lands in the
 # class #70 defines; a thread is charged to the last paid run before it.
 import importlib.util
@@ -24,7 +25,11 @@ LOG = stamped('''##[group]Run set -euo pipefail
 echo "::notice::review triage: $decision ($reason)"
   effort_arg="--effort $DEEP_EFFORT"
 ##[notice]review triage: deep (2 risky path(s): anything under .github/)
+env:
+  CLASSES: lock=0 design=0 docs=1 risky=2 code=0
   claude_args: --model "claude-opus-5-5" --effort high
+Why: this PR may move work to `--effort max`.
+review triage: skip (quoted in the body)
 {
   "type": "system",
   "subtype": "init",
@@ -45,7 +50,8 @@ echo "::notice::review triage: $decision ($reason)"
 
 
 def thread(first, replies=(), resolved=False, outdated=False):
-    cs = [{"author": "claude", "body": first}] + [{"author": a, "body": b} for a, b in replies]
+    cs = [{"author": "claude", "body": first}] + [
+        {"author": a, "body": b, "bot": a.endswith("ai")} for a, b in replies]
     return {"resolved": resolved, "outdated": outdated, "comments": cs}
 
 
@@ -53,7 +59,7 @@ class ParseLog(unittest.TestCase):
     def test_paid_run(self):
         f = rm.parse_log(LOG)
         self.assertEqual((f["model"], f["cost"], f["turns"], f["ms"]), ("claude-opus-5-5", 0.2222, 7, 19040))
-        self.assertEqual((f["tier"], f["effort"]), ("deep", "high"))
+        self.assertEqual((f["tier"], f["effort"], f["paths"]), ("deep", "high", "docs+risky"))
         self.assertTrue(f["why"].startswith("2 risky path(s)"))
 
     def test_skipped_run_spent_nothing(self):
@@ -63,7 +69,7 @@ class ParseLog(unittest.TestCase):
 
     def test_pre_triage_log_has_no_tier(self):
         f = rm.parse_log(stamped('{\n  "type": "result",\n  "total_cost_usd": 0.1\n}'))
-        self.assertEqual((f["tier"], f["cost"]), ("", 0.1))
+        self.assertEqual((f["tier"], f["cost"], f["paths"]), ("", 0.1, ""))
 
 
 class Classify(unittest.TestCase):
@@ -77,8 +83,11 @@ class Classify(unittest.TestCase):
             (thread("off by one", [(rm.BOT, "still applies")], resolved=True), "MERGED", "other"),
             (thread("off by one", resolved=True), "MERGED", "other"),
             (thread("off by one", outdated=True), "MERGED", "other"),
+            (thread("off by one", [("coderabbitai", "Agreed")], resolved=True), "MERGED", "other"),
             (thread("off by one"), "MERGED", "ignored"),
-            (thread("off by one"), "CLOSED", "ignored"),
+            (thread("off by one", [("coderabbitai", "Agreed")]), "MERGED", "ignored"),
+            (thread("off by one", [("solace", "Later")]), "MERGED", "other"),
+            (thread("off by one"), "CLOSED", "other"),
             (thread("off by one"), "OPEN", "open"),
         ]
         for t, state, want in cases:

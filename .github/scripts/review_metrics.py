@@ -5,9 +5,11 @@
 # Spend: every run of each repo's review workflow in the window, read from its
 # job log, where claude-code-action prints the session's init message (the
 # model) and its result message (total_cost_usd, turns, wall time), and where
-# the triage step (#69) leaves its "review triage: <tier>" notice. A run with
-# no result message spent nothing: the review step was skipped, on the
-# fingerprint, the triage or the budget. Under an OAuth token total_cost_usd
+# the triage step (#69) leaves its "review triage: <tier>" notice and its
+# path classes. Only GitHub's own lines are read for those: the PR body is
+# echoed into the log too, and may quote them. A run with no result message
+# spent nothing: the review step was skipped, on the fingerprint, the triage
+# or the budget. Under an OAuth token total_cost_usd
 # is the API-equivalent price, not a bill; it still compares runs fairly.
 #
 # Outcome: every review thread claude[bot] opened on those pull requests,
@@ -16,11 +18,14 @@
 #   fixed     resolved, and a later commit changed the anchored lines (the
 #             thread is outdated) or a reply says fixed
 #   declined  resolved, lines unchanged, with a human reply
-#   ignored   unresolved on a merged or closed pull request
+#   ignored   unresolved and never answered, on a merged pull request
 #   open      unresolved on an open pull request
-#   other     resolved silently with the lines unchanged; or outdated and
-#             unresolved: a fix nobody confirmed
-# Each thread is charged to the run whose window holds its creation, so it
+#   other     resolved silently with the lines unchanged; outdated and
+#             unresolved, a fix nobody confirmed; answered but left open on
+#             a merged one; or left on a pull request closed unmerged
+# A reply from another bot is not an answer. The first comment's 👍 and 👎
+# are counted, the cheaper human signal #70 names.
+# Each thread is charged to the last paid run of its PR started before it, so it
 # carries that run's model and tier.
 #
 # Usage: review_metrics.py [--owner LOGIN] [--repos a,b] [--days N]
@@ -44,8 +49,9 @@ NAME = "review_metrics"
 sys.dont_write_bytecode = True
 BOT = "claude"  # the GraphQL login of claude[bot]
 STAMP = re.compile(r"^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ?")
-TRIAGE = re.compile(r"review triage: (skip|default|deep) \((.*)\)\s*$")
-EFFORT = re.compile(r"--effort\s+([a-z]+)")
+TRIAGE = re.compile(r"^##\[notice\]review triage: (skip|default|deep) \((.*)\)\s*$")
+EFFORT = re.compile(r"^\s+claude_args: .*--effort\s+([a-z]+)")
+CLASSES = re.compile(r"^\s+CLASSES: ((?:[a-z]+=\d+ ?)+)$")
 FIXED = re.compile(r"\b(fixed|done|addressed|applied|resolved in|in [0-9a-f]{7,40})\b", re.I)
 JUDGMENT = re.compile(r"^\W*judgment\s*\(", re.I)
 
@@ -56,9 +62,10 @@ def die(msg):
 
 
 def gh(*args, ok404=False):
+    # ok404 forgives 410 too: a log past the retention window is gone, not an error.
     p = subprocess.run(["gh", *args], capture_output=True, encoding="utf-8", errors="replace")
     if p.returncode:
-        if ok404 and "404" in p.stderr:
+        if ok404 and ("404" in p.stderr or "410" in p.stderr):
             return None
         die("gh %s: %s" % (" ".join(args[:3]), p.stderr.strip()))
     return p.stdout
@@ -77,7 +84,8 @@ def pages(path):
 def parse_log(text):
     """The run's model, cost, turns, wall time, tier and effort, from one job log."""
     lines = [STAMP.sub("", ln) for ln in text.splitlines()]
-    out = {"model": "", "cost": None, "turns": None, "ms": None, "tier": "", "why": "", "effort": ""}
+    out = {"model": "", "cost": None, "turns": None, "ms": None, "tier": "", "why": "", "effort": "",
+           "paths": ""}
     i = 0
     while i < len(lines):
         ln = lines[i]
@@ -103,13 +111,16 @@ def parse_log(text):
         m = EFFORT.search(ln)
         if m:
             out["effort"] = m.group(1)
+        m = CLASSES.search(ln)
+        if m:
+            out["paths"] = "+".join(k for k, v in (kv.split("=") for kv in m.group(1).split()) if v != "0") or "none"
         i += 1
     return out
 
 
 def classify(thread, pr_state):
     first = thread["comments"][0]["body"] if thread["comments"] else ""
-    replies = [c for c in thread["comments"][1:] if c["author"] != BOT]
+    replies = [c for c in thread["comments"][1:] if c["author"] != BOT and not c.get("bot")]
     if JUDGMENT.match(first):
         return "judgment"
     said_fixed = any(FIXED.search(c["body"]) for c in replies)
@@ -119,32 +130,49 @@ def classify(thread, pr_state):
         return "declined" if replies else "other"
     if thread["outdated"]:
         return "other"
-    return "open" if pr_state == "OPEN" else "ignored"
+    if pr_state == "OPEN":
+        return "open"
+    return "ignored" if pr_state == "MERGED" and not replies else "other"
 
 
 THREADS_Q = """
-query($owner: String!, $name: String!, $pr: Int!) {
+query($owner: String!, $name: String!, $pr: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $pr) {
       state
-      reviewThreads(first: 100) {
+      reviewThreads(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
         nodes { isResolved isOutdated path
-          comments(first: 20) { nodes { author { login } createdAt body } } } } } } }"""
+          comments(first: 50) {
+            pageInfo { hasNextPage }
+            nodes { author { __typename login } createdAt body
+              reactionGroups { content reactors { totalCount } } } } } } } } }"""
 
 
 def threads(repo, pr):
     owner, name = repo.split("/")
-    d = gh_json("api", "graphql", "-F", "owner=" + owner, "-F", "name=" + name, "-F", "pr=%d" % pr,
-                "-f", "query=" + THREADS_Q)
-    p = d["data"]["repository"]["pullRequest"]
-    found = []
-    for t in p["reviewThreads"]["nodes"]:
-        cs = [{"author": (c["author"] or {}).get("login", ""), "at": c["createdAt"], "body": c["body"]}
-              for c in t["comments"]["nodes"]]
-        if cs and cs[0]["author"] == BOT:
-            found.append({"resolved": t["isResolved"], "outdated": t["isOutdated"], "path": t["path"],
-                          "at": cs[0]["at"], "comments": cs})
-    return p["state"], found
+    found, after = [], None
+    while True:
+        args = ["api", "graphql", "-F", "owner=" + owner, "-F", "name=" + name, "-F", "pr=%d" % pr,
+                "-f", "query=" + THREADS_Q]
+        if after:
+            args += ["-f", "after=" + after]
+        p = gh_json(*args)["data"]["repository"]["pullRequest"]
+        for t in p["reviewThreads"]["nodes"]:
+            if t["comments"]["pageInfo"]["hasNextPage"]:
+                print("%s: %s#%d: a thread past 50 comments; later replies not read" % (NAME, repo, pr),
+                      file=sys.stderr)
+            cs = [{"author": (c["author"] or {}).get("login", ""), "bot": (c["author"] or {}).get("__typename") == "Bot",
+                   "at": c["createdAt"], "body": c["body"],
+                   "reactions": {g["content"]: g["reactors"]["totalCount"] for g in c.get("reactionGroups") or []}}
+                  for c in t["comments"]["nodes"]]
+            if cs and cs[0]["author"] == BOT:
+                found.append({"resolved": t["isResolved"], "outdated": t["isOutdated"], "path": t["path"],
+                              "at": cs[0]["at"], "comments": cs})
+        page = p["reviewThreads"]["pageInfo"]
+        if not page["hasNextPage"]:
+            return p["state"], found
+        after = page["endCursor"]
 
 
 def runs_of(repo, workflow, since):
@@ -170,11 +198,12 @@ def collect(repo, workflow, since):
         if run.get("event") != "pull_request":
             continue
         jobs = gh_json("api", "repos/%s/actions/runs/%d/jobs" % (repo, run["id"]))["jobs"]
+        pr = pr_of(repo, run)
         for job in jobs:
             log = gh("api", "--allow-escape-sequences", "repos/%s/actions/jobs/%d/logs" % (repo, job["id"]),
                      ok404=True) or ""
             facts = parse_log(log)
-            rows.append({"repo": repo, "pr": pr_of(repo, run), "run": run["id"], "job": job["name"],
+            rows.append({"repo": repo, "pr": pr, "run": run["id"], "job": job["name"],
                          "conclusion": job.get("conclusion") or "", "started": job.get("started_at") or "",
                          "ended": job.get("completed_at") or "", "ran": facts["cost"] is not None, **facts})
     return rows
@@ -203,13 +232,14 @@ def money(x):
 
 
 def table(title, key, runs, ths):
-    groups = sorted({key(r) for r in runs if r["ran"]} | {t["by_" + title] for t in ths})
+    by = "by_" + title.replace(" ", "_")
+    groups = sorted({key(r) for r in runs if r["ran"]} | {t[by] for t in ths})
     out = ["", "### By %s" % title, "",
            "| %s | runs | spend | per run | threads | fixed | declined | ignored | judgment | per fixed |" % title,
            "|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|"]
     for g in groups:
         rs = [r for r in runs if r["ran"] and key(r) == g]
-        ts = [t for t in ths if t["by_" + title] == g]
+        ts = [t for t in ths if t[by] == g]
         spend = sum(r["cost"] or 0 for r in rs)
         n = defaultdict(int)
         for t in ts:
@@ -232,15 +262,18 @@ def markdown(runs, ths, since):
                len(runs), len(ran), len(prs), money(spend), money(spend / len(ran)) if ran else "-"),
            "%d bot threads: %s." % (len(ths), ", ".join("%d %s" % (n[k], k) for k in
                                     ("fixed", "declined", "ignored", "judgment", "open", "other") if n[k])),
-           "Per fixed thread: %s." % (money(spend / n["fixed"]) if n["fixed"] else "no fixed threads")]
+           "Per fixed thread: %s." % (money(spend / n["fixed"]) if n["fixed"] else "no fixed threads"),
+           "Reactions on the bot's first comments: %d 👍, %d 👎." % (
+               sum(t["up"] for t in ths), sum(t["down"] for t in ths))]
     out += table("model", lambda r: r["model"], runs, ths)
     out += table("tier", lambda r: r["tier"] or "pre-triage", runs, ths)
+    out += table("path class", lambda r: r["paths"] or "pre-triage", runs, ths)
     out += table("repo", lambda r: r["repo"], runs, ths)
     skipped = defaultdict(int)
     for r in runs:
         if not r["ran"]:
-            if r["tier"]:
-                why = "%s: %s" % (r["tier"], r["why"])
+            if r["tier"] == "skip":
+                why = "skip: %s" % r["why"]
             elif r["conclusion"] == "success":
                 why = "review step skipped (fingerprint or no token)"
             else:
@@ -289,14 +322,17 @@ def main():
                 ths.append({"repo": repo, "pr": pr, "path": t["path"], "at": t["at"],
                             "class": classify(t, state), "run": r.get("run", ""),
                             "by_model": r.get("model", ""), "by_tier": r.get("tier", "") or "pre-triage",
-                            "by_repo": repo, "first_line": t["comments"][0]["body"].splitlines()[0][:120]})
+                            "by_path_class": r.get("paths", "") or "pre-triage", "by_repo": repo,
+                            "up": t["comments"][0].get("reactions", {}).get("THUMBS_UP", 0),
+                            "down": t["comments"][0].get("reactions", {}).get("THUMBS_DOWN", 0),
+                            "first_line": (t["comments"][0]["body"].splitlines() or [""])[0][:120]})
     sys.stdout.write(markdown(runs, ths, since))
     if a.csv:
         write_csv(a.csv, runs, ["repo", "pr", "run", "job", "conclusion", "started", "ended", "ran", "model",
-                                "effort", "tier", "why", "cost", "turns", "ms"])
+                                "effort", "tier", "why", "paths", "cost", "turns", "ms"])
     if a.threads_csv:
-        write_csv(a.threads_csv, ths, ["repo", "pr", "run", "at", "class", "by_model", "by_tier", "path",
-                                       "first_line"])
+        write_csv(a.threads_csv, ths, ["repo", "pr", "run", "at", "class", "by_model", "by_tier",
+                                       "by_path_class", "path", "up", "down", "first_line"])
 
 
 if __name__ == "__main__":
