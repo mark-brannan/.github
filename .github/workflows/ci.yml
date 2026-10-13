@@ -69,10 +69,27 @@ jobs:
       pull-requests: write
     uses: ./.github/workflows/complexity.yml
 
+  # The duplication engine's suite, with a stub jscpd; seconds.
+  duplication-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: python3 .github/scripts/duplication.test.py
+
+  # The workflow run on this repo's own PRs against the engine they carry. A
+  # measurement, so it stays out of ci-gate's needs.
+  duplication:
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: ./.github/workflows/duplication.yml
+
   # The single required status check. `always()` lets it evaluate when a
   # dependency failed or was skipped instead of inheriting the skip.
   ci-gate:
-    needs: [nonempty, secret-scan, complexity-tests]
+    needs: [nonempty, secret-scan, complexity-tests, duplication-tests]
     if: always()
     permissions: {}
     uses: ./.github/workflows/ci-gate.yml
