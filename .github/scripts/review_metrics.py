@@ -79,11 +79,6 @@ def gh_json(*args, ok404=False):
     return None if out is None else json.loads(out)
 
 
-def pages(path):
-    # --paginate --slurp: one JSON array of every page's body.
-    return gh_json("api", "--paginate", "--slurp", path) or []
-
-
 def parse_log(text):
     """The run's model, cost, turns, wall time, tier and effort, from one job log."""
     lines = [STAMP.sub("", ln) for ln in text.splitlines()]
