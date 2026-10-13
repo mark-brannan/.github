@@ -41,3 +41,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261013t232107z
 - a failed comment count leaves the cap unenforced for that run but blocks auto-escalation Undo: treat a failed count as 0 (or as at-cap) ([#69](https://github.com/mark-brannan/.github/pull/69))
+
+### 20261013t232127z
+- the 4-per-PR review cap counts every claude[bot] comment on the PR, review runs and @claude replies alike Undo: count only the 'Claude finished' review comments ([#69](https://github.com/mark-brannan/.github/pull/69))
