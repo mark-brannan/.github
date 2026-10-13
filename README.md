@@ -8,7 +8,7 @@ workflows; the substance lives here, once.
 |---|---|
 | `.mergify.yml` | `extends: .github` in the repository's `.mergify.yml` |
 | `.github/workflows/ci-gate.yml` | `uses: mark-brannan/.github/.github/workflows/ci-gate.yml@main` from a job named `ci-gate` |
-| `.github/workflows/claude-review.yml` | `uses: mark-brannan/.github/.github/workflows/claude-review.yml@main` |
+| `.github/workflows/claude-review.yml` | `uses: mark-brannan/.github/.github/workflows/claude-review.yml@main`; labels `review:skip` and `review:deep` override its triage |
 | `.github/workflows/nonempty-diff.yml` | `uses: mark-brannan/.github/.github/workflows/nonempty-diff.yml@main`; fails an empty PR and any PR that adds a line starting with a tab; files exempt from the tab check are listed in `.github/config/no-tabs-allowlist.txt` |
 | `.github/workflows/complexity.yml` | `uses: mark-brannan/.github/.github/workflows/complexity.yml@main`, with `pull-requests: write`, outside `ci-gate`'s needs; posts each touched function's complexity change as a PR comment, never a gate |
 | `.github/workflows/duplication.yml` | `uses: mark-brannan/.github/.github/workflows/duplication.yml@main`, with `pull-requests: write`, outside `ci-gate`'s needs; posts the new clones and repeated literals a PR adds as a PR comment, never a gate |
