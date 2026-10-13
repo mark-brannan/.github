@@ -29,3 +29,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261013t220627z
 - claude-review labels are review:skip and review:deep only, no review:run Undo: add a review:run arm to the triage case ([#69](https://github.com/mark-brannan/.github/pull/69))
+
+### 20261013t220650z
+- claude-review triage thresholds 10/50/800 lines, budget pause at 90 percent, deep model claude-opus-5-5 at --effort high Undo: change the workflow input defaults ([#69](https://github.com/mark-brannan/.github/pull/69))
