@@ -17,3 +17,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261013t202807z
 - duplication leaves Markdown, plain text, JSON, lockfiles, SVG, vendor/ and node_modules/ out of both checks Undo: empty IGNORE and SKIP_* in duplication.py ([#66](https://github.com/mark-brannan/.github/pull/66))
+
+### 20261013t202825z
+- a duplication clone is keyed by its two copies' paths and space-squeezed text, no line numbers Undo: switch to jscpd --baseline-from-ref ([#66](https://github.com/mark-brannan/.github/pull/66))
