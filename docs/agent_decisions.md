@@ -47,3 +47,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261013t234215z
 - review-metrics reports total_cost_usd under the OAuth token as the API-equivalent price, not a bill Undo: report it as a bill, or drop the dollar figures ([#71](https://github.com/mark-brannan/.github/pull/71))
+
+### 20261013t234233z
+- review-metrics counts a resolved, outdated thread as fixed; a rebase that moves the lines also marks it Undo: drop isOutdated from the fixed test ([#71](https://github.com/mark-brannan/.github/pull/71))
