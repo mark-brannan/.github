@@ -275,6 +275,29 @@ jobs:
           gh api repos/mark-brannan/claude/contents/rules/writing.md \
             -H 'Accept: application/vnd.github.raw' > .writing-rubric.md
 
+      # The threads already on the pull request, open and resolved, so a
+      # re-review on a new push adds only what is new. Fetched here for the
+      # same reason as the rubric: a Read for the agent, no `gh api` of its
+      # own. A failed fetch only costs the de-duplication.
+      - if: steps.seen.outputs.cache-hit != 'true' && steps.tok.outputs.present == 'true'
+        name: Fetch the review threads already raised
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh api graphql -F owner="${GITHUB_REPOSITORY%/*}" -F name="${GITHUB_REPOSITORY#*/}" -F pr="$PR" -f query='
+            query($owner: String!, $name: String!, $pr: Int!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $pr) {
+                  reviewThreads(first: 100) {
+                    nodes { isResolved path line
+                      comments(first: 20) { nodes { author { login } body } } } } } } }' \
+            --jq '.data.repository.pullRequest.reviewThreads.nodes[]
+              | "## \(.path):\(.line // "outdated") \(if .isResolved then "(resolved)" else "(open)" end)\n"
+                + ([.comments.nodes[] | "- \(.author.login // "ghost"): \(.body)"] | join("\n")) + "\n"' \
+            > .prior-threads.md
+
       # Pinned off v1.0.218's Claude Code 2.1.265 install: on a cold Actions
       # cache the native installer's launcher step fails silently -- exits 0,
       # prints "successfully installed", but its own setup notes say
@@ -306,20 +329,27 @@ jobs:
             For added or changed README, CHANGELOG, docs and SKILL.md prose,
             also Read .writing-rubric.md (skip this if the file is missing)
             and comment where an added line breaks a rule in it, citing the
-            rule.
+            rule. Skip the rubric under docs/research/: reports there are id
+            lists and tables, not prose.
 
-            Label every finding `toil` or `judgment`. Toil is anything the
-            author can settle alone -- a bug, a missed case, a name, a
-            broken convention: give the exact fix. Judgment is a question of
-            values, risk, direction, legal or people: name which, and say
-            why the diff cannot settle it. Ask no question whose answer the
-            repository already gives or the author would find obvious; state
-            the answer as a toil finding instead.
+            Read .prior-threads.md if it exists: the review threads already
+            on this pull request, open and resolved. Do not post a finding
+            one of them already raises, whether it was fixed, answered or
+            declined. Raise it again only when the new diff changes the
+            answer, and then say which thread and what changed.
+
+            Most findings are the author's to settle alone -- a bug, a
+            missed case, a name, a broken convention: give the exact fix and
+            no label. Label a finding only when it is a question of values,
+            risk, direction, legal or people: open it with "Judgment
+            (<which>):" and say why the diff cannot settle it. Ask no
+            question whose answer the repository already gives or the author
+            would find obvious; state the answer as a fix instead.
           # Comments cannot go inside claude_args; the action passes that
           # block through to the CLI verbatim.
           claude_args: |
             --model "${{ inputs.model }}"
-            --allowedTools "${{ inputs.allowed-tools }},Read(.writing-rubric.md)"
+            --allowedTools "${{ inputs.allowed-tools }},Read(.writing-rubric.md),Read(.prior-threads.md)"
 
       # Proof the guards were live, read from the session's own init message
       # rather than from what the install step claimed. Checked after the run
