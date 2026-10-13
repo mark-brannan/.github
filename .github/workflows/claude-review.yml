@@ -49,6 +49,29 @@ name: Claude PR Review
 # repository's, so fingerprints never cross repositories.
 # Ported from mark-brannan/symphony 66bdddc.
 #
+# Not every pull request earns a review, and not every one earns the same
+# review (mark-brannan/.github#68). A triage step reads the labels, the author
+# and the diff before anything is installed and picks one of three tiers:
+#
+#   skip     a `review:skip` label; a Dependabot PR; a lockfile-only diff; a
+#            diff of governing documents alone (the design set the mixed-loops
+#            guard names: CLAUDE.md, .claude/rules, ADRs, decisions -- a bot's
+#            comment there is evidence, never a ruling, so it is mostly noise);
+#            a docs-only diff under `docs-skip-lines`; any diff under
+#            `skip-under-lines` that touches no risky path.
+#   default  the caller's `model`, no effort flag: what every PR got before.
+#   deep     a `review:deep` label; a risky path (workflows, actions, Mergify,
+#            hooks, settings, Dockerfiles, .github/scripts); a diff over
+#            `deep-over-lines`. Runs on `deep-model` with `--effort deep-effort`.
+#
+# Then, with the token in hand, a budget probe asks the plan's usage endpoint
+# how much of each rate window is used. Past `budget-pause-at` percent on any
+# window the review is skipped as `budget`, so a reviewer never spends the
+# last of a window a human session is about to need. The probe failing is
+# unknown, not full: the review runs. A skipped PR records no fingerprint, so
+# the next push is triaged afresh. The decision and its reasons go in the job
+# summary; nothing is posted on the pull request.
+#
 # Auth: needs the CLAUDE_CODE_OAUTH_TOKEN secret in the calling repository
 # (mint one with `claude setup-token`, then `gh secret set
 # CLAUDE_CODE_OAUTH_TOKEN`). Until that secret exists the review step skips
@@ -104,6 +127,36 @@ on:
         required: false
         type: string
         default: claude-sonnet-5-5
+      deep-model:
+        description: The model the deep tier runs on (risky paths, large diffs, the review:deep label)
+        required: false
+        type: string
+        default: claude-opus-5-5
+      deep-effort:
+        description: The --effort the deep tier runs with; empty passes no flag
+        required: false
+        type: string
+        default: high
+      skip-under-lines:
+        description: A diff with at most this many changed lines, touching no risky path, is not reviewed; 0 disables
+        required: false
+        type: number
+        default: 10
+      docs-skip-lines:
+        description: A docs-only diff (markdown, text) with at most this many changed lines is not reviewed; 0 disables
+        required: false
+        type: number
+        default: 50
+      deep-over-lines:
+        description: A diff with more changed lines than this gets the deep tier
+        required: false
+        type: number
+        default: 800
+      budget-pause-at:
+        description: Percent of any plan rate window (5-hour, 7-day, per-model) at or past which the review is skipped; 100 disables
+        required: false
+        type: number
+        default: 90
       allowed-bots:
         description: Bot logins whose pull requests are reviewed anyway (the action refuses non-human actors by default). Overriding replaces this default, so include mergify[bot] and mark-brannan-release-please[bot] in the override too.
         required: false
@@ -170,48 +223,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # The fail-closed PreToolUse hooks deny every Bash call unless they
-      # exist under $HOME -- a bare runner never has them, so the review
-      # agent could read the diff but not execute anything. The
-      # claude-config composite action (mark-brannan/dotfiles#326) checks
-      # out mark-brannan/claude and installs it as $HOME/.claude, so the
-      # install logic lives in one place.
-      #
-      # `@main` is deliberate: first-party refs are never pinned, at any hop
-      # (mark-brannan/.github#18, README "Nothing here is ever pinned"). Don't pin this.
-      - name: Seed $HOME with Claude config from dotfiles
-        id: claude-config
-        if: inputs.seed-home
-        uses: mark-brannan/dotfiles/.github/actions/claude-config@main
-
-      # Verified against the action's `complete` output, not its exit code
-      # or a file it happens to ship today -- a silent partial install would
-      # otherwise look identical to a real one. `complete` vouches for the
-      # config, not for hooks that arrive through a plugin, so the note
-      # below claims no more than that.
-      - name: Verify the seed
-        id: seed
-        env:
-          SEED_HOME: ${{ inputs.seed-home }}
-          SEED_COMPLETE: ${{ steps.claude-config.outputs.complete }}
-        run: |
-          if [ "$SEED_HOME" != "true" ]; then
-            echo "note=seed-home is false; \$HOME was not seeded here, Bash calls may be fully or partially gated by whatever guards the runner already has" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "$SEED_COMPLETE" = "true" ]; then
-            echo "note=\$HOME seeded from mark-brannan/claude (the claude-config action reports a complete install: settings.json landed)" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::Claude config seeding reported incomplete -- this review will run degraded"
-            echo "note=\$HOME seeding was incomplete -- Bash calls may be denied fail-closed or may run unguarded; say so plainly in your summary comment" >> "$GITHUB_OUTPUT"
-          fi
-
-      - if: inputs.node-version != ''
-        uses: actions/setup-node@v7
-        with:
-          node-version: ${{ inputs.node-version }}
-          cache: npm
-
       - name: Fingerprint the PR's content
         id: fp
         env:
@@ -229,6 +240,89 @@ jobs:
           if [ -n "$raw" ]; then id=$(printf '%s\n' "$raw" | sha256sum | cut -d' ' -f1); else id=empty; fi
           echo "id=$id" >> "$GITHUB_OUTPUT"
           echo "since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # Which tier, from the labels, the author and the diff alone; the
+      # path classes mirror the mixed-loops guard's design set and the review
+      # prompt's own list of what to scrutinise. Every input reaches the
+      # script through env, never interpolated into it.
+      - name: Triage the pull request
+        id: triage
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          DEFAULT_MODEL: ${{ inputs.model }}
+          DEEP_MODEL: ${{ inputs.deep-model }}
+          DEEP_EFFORT: ${{ inputs.deep-effort }}
+          SKIP_UNDER: ${{ inputs.skip-under-lines }}
+          DOCS_SKIP: ${{ inputs.docs-skip-lines }}
+          DEEP_OVER: ${{ inputs.deep-over-lines }}
+        run: |
+          set -euo pipefail
+          mb=$(git merge-base "origin/$BASE" HEAD)
+          files=0 lock=0 design=0 docs=0 risky=0 code=0 lines=0
+          while IFS=$'\t' read -r add del f; do
+            [ -n "$f" ] || continue
+            files=$((files + 1))
+            [ "$add" = "-" ] || lines=$((lines + add))
+            [ "$del" = "-" ] || lines=$((lines + del))
+            case "$f" in
+              package-lock.json|*/package-lock.json|npm-shrinkwrap.json|yarn.lock|pnpm-lock.yaml|\
+              Cargo.lock|poetry.lock|uv.lock|Pipfile.lock|Gemfile.lock|composer.lock|go.sum|flake.lock)
+                lock=$((lock + 1)) ;;
+              CLAUDE.md|*/CLAUDE.md|.claude/rules/*|.claude/docs/*|\
+              docs/decisions.md|docs/references.md|docs/adr/*|*.adr.md|docs/curia/*|\
+              .claude/skills/curia/*|.claude/skills/agora/*)
+                design=$((design + 1)) ;;
+              .github/workflows/*|.github/actions/*|.github/scripts/*|action.yml|*/action.yml|\
+              .mergify.yml|.claude/hooks/*|.claude/settings.json|.claude/settings.*.json|\
+              Dockerfile|*/Dockerfile|Dockerfile.*|*/Dockerfile.*)
+                risky=$((risky + 1)) ;;
+              *.md|*.markdown|*.txt|*.rst|LICENSE|LICENSE.*)
+                docs=$((docs + 1)) ;;
+              *)
+                code=$((code + 1)) ;;
+            esac
+          done < <(git diff --numstat "$mb" HEAD)
+
+          decision=default reason="no rule matched"
+          case " $LABELS " in
+            *" review:skip "*) decision=skip reason="review:skip label" ;;
+            *" review:deep "*) decision=deep reason="review:deep label" ;;
+          esac
+          if [ "$decision" = default ]; then
+            if [ "$AUTHOR" = "dependabot[bot]" ]; then
+              decision=skip reason="Dependabot pull request"
+            elif [ "$files" -gt 0 ] && [ "$lock" -eq "$files" ]; then
+              decision=skip reason="lockfile-only diff"
+            elif [ "$files" -gt 0 ] && [ "$design" -eq "$files" ]; then
+              decision=skip reason="governing documents only (a bot's comment there is evidence, never a ruling)"
+            elif [ "$files" -gt 0 ] && [ "$docs" -eq "$files" ] && [ "$DOCS_SKIP" -gt 0 ] && [ "$lines" -le "$DOCS_SKIP" ]; then
+              decision=skip reason="docs-only diff of $lines lines (at most $DOCS_SKIP)"
+            elif [ "$risky" -eq 0 ] && [ "$SKIP_UNDER" -gt 0 ] && [ "$lines" -le "$SKIP_UNDER" ]; then
+              decision=skip reason="$lines changed lines (at most $SKIP_UNDER), no risky path"
+            elif [ "$risky" -gt 0 ]; then
+              decision=deep reason="$risky risky path(s): workflows, actions, Mergify, hooks, settings, scripts or Dockerfiles"
+            elif [ "$lines" -gt "$DEEP_OVER" ]; then
+              decision=deep reason="$lines changed lines (more than $DEEP_OVER)"
+            fi
+          fi
+
+          model=$DEFAULT_MODEL effort_arg=
+          if [ "$decision" = deep ]; then
+            model=$DEEP_MODEL
+            [ -n "$DEEP_EFFORT" ] && effort_arg="--effort $DEEP_EFFORT"
+          fi
+          {
+            echo "decision=$decision"
+            echo "reason=$reason"
+            echo "model=$model"
+            echo "effort-arg=$effort_arg"
+            echo "lines=$lines"
+            echo "files=$files"
+            echo "classes=lock=$lock design=$design docs=$docs risky=$risky code=$code"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::review triage: $decision ($reason)"
 
       - name: Skip if this content was already reviewed
         id: seen
@@ -253,12 +347,119 @@ jobs:
             echo "::warning::CLAUDE_CODE_OAUTH_TOKEN is not set; skipping the review"
           fi
 
+      # How full the plan's rate windows are, from the endpoint the Claude
+      # Code status line reads. Unknown is not full: a failed probe lets the
+      # review run and says so in the summary.
+      - name: Probe the plan budget
+        id: budget
+        if: steps.triage.outputs.decision != 'skip' && steps.seen.outputs.cache-hit != 'true' && steps.tok.outputs.present == 'true'
+        env:
+          TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          PAUSE_AT: ${{ inputs.budget-pause-at }}
+        run: |
+          set -uo pipefail
+          used=$(curl -sS -m 20 https://api.anthropic.com/api/oauth/usage \
+                   -H "Authorization: Bearer $TOKEN" -H "anthropic-beta: oauth-2025-04-20" \
+                 | jq -r '[.limits[]? | .percent] | max // empty' 2>/dev/null) || used=
+          if [ -z "$used" ]; then
+            echo "used=unknown" >> "$GITHUB_OUTPUT"
+            echo "pause=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::plan usage probe failed; reviewing anyway"
+            exit 0
+          fi
+          echo "used=$used" >> "$GITHUB_OUTPUT"
+          if [ "${used%.*}" -ge "$PAUSE_AT" ]; then
+            echo "pause=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::review triage: skip (plan usage at $used%, pause at $PAUSE_AT%)"
+          else
+            echo "pause=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # One switch the steps below read, and the decision written where a
+      # human looks for it.
+      - name: Decide whether the review runs
+        id: gate
+        env:
+          DECISION: ${{ steps.triage.outputs.decision }}
+          REASON: ${{ steps.triage.outputs.reason }}
+          MODEL: ${{ steps.triage.outputs.model }}
+          EFFORT: ${{ steps.triage.outputs.effort-arg }}
+          LINES: ${{ steps.triage.outputs.lines }}
+          FILES: ${{ steps.triage.outputs.files }}
+          CLASSES: ${{ steps.triage.outputs.classes }}
+          SEEN: ${{ steps.seen.outputs.cache-hit }}
+          TOKEN_PRESENT: ${{ steps.tok.outputs.present }}
+          USED: ${{ steps.budget.outputs.used }}
+          PAUSE: ${{ steps.budget.outputs.pause }}
+        run: |
+          run=true outcome=$DECISION why=$REASON
+          if [ "$DECISION" = skip ]; then run=false
+          elif [ "$SEEN" = true ]; then run=false outcome=skip why="this content was already reviewed (fingerprint)"
+          elif [ "$TOKEN_PRESENT" != true ]; then run=false outcome=skip why="CLAUDE_CODE_OAUTH_TOKEN is not set"
+          elif [ "$PAUSE" = true ]; then run=false outcome=skip why="plan usage at $USED%"
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Claude review triage: $outcome"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| reason | $why |"
+            echo "| tier | $DECISION ($REASON) |"
+            echo "| model | ${MODEL:-} ${EFFORT:-} |"
+            echo "| diff | $LINES lines in $FILES files; $CLASSES |"
+            echo "| plan usage | ${USED:-not probed}% |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      # The fail-closed PreToolUse hooks deny every Bash call unless they
+      # exist under $HOME -- a bare runner never has them, so the review
+      # agent could read the diff but not execute anything. The
+      # claude-config composite action (mark-brannan/dotfiles#326) checks
+      # out mark-brannan/claude and installs it as $HOME/.claude, so the
+      # install logic lives in one place.
+      #
+      # `@main` is deliberate: first-party refs are never pinned, at any hop
+      # (mark-brannan/.github#18, README "Nothing here is ever pinned"). Don't pin this.
+      - name: Seed $HOME with Claude config from dotfiles
+        id: claude-config
+        if: steps.gate.outputs.run == 'true' && inputs.seed-home
+        uses: mark-brannan/dotfiles/.github/actions/claude-config@main
+
+      # Verified against the action's `complete` output, not its exit code
+      # or a file it happens to ship today -- a silent partial install would
+      # otherwise look identical to a real one. `complete` vouches for the
+      # config, not for hooks that arrive through a plugin, so the note
+      # below claims no more than that.
+      - name: Verify the seed
+        id: seed
+        if: steps.gate.outputs.run == 'true'
+        env:
+          SEED_HOME: ${{ inputs.seed-home }}
+          SEED_COMPLETE: ${{ steps.claude-config.outputs.complete }}
+        run: |
+          if [ "$SEED_HOME" != "true" ]; then
+            echo "note=seed-home is false; \$HOME was not seeded here, Bash calls may be fully or partially gated by whatever guards the runner already has" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$SEED_COMPLETE" = "true" ]; then
+            echo "note=\$HOME seeded from mark-brannan/claude (the claude-config action reports a complete install: settings.json landed)" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Claude config seeding reported incomplete -- this review will run degraded"
+            echo "note=\$HOME seeding was incomplete -- Bash calls may be denied fail-closed or may run unguarded; say so plainly in your summary comment" >> "$GITHUB_OUTPUT"
+          fi
+
+
+      - if: steps.gate.outputs.run == 'true' && inputs.node-version != ''
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
       # The seeded settings.json declares the languette marketplace as a
       # `github` source, but the action only accepts an https .git URL, and
       # Claude Code refuses to add a marketplace whose source differs from
       # the one settings declares for that name. Restate the seeded entry as
       # the same git URL the action adds, so the two agree.
-      - if: inputs.seed-home && steps.seen.outputs.cache-hit != 'true' && steps.tok.outputs.present == 'true'
+      - if: steps.gate.outputs.run == 'true' && inputs.seed-home
         name: Match the seeded languette marketplace to the action's URL
         run: |
           s="$HOME/.claude/settings.json"
@@ -269,7 +470,7 @@ jobs:
       # The writing rubric lives once, in mark-brannan/claude. Fetched here,
       # before the agent starts, so the agent gets a Read of one file and no
       # `gh api` of its own. A failed fetch only costs the prose check.
-      - if: steps.seen.outputs.cache-hit != 'true' && steps.tok.outputs.present == 'true'
+      - if: steps.gate.outputs.run == 'true'
         name: Fetch the writing rubric
         continue-on-error: true
         env:
@@ -282,7 +483,7 @@ jobs:
       # re-review on a new push adds only what is new. Fetched here for the
       # same reason as the rubric: a Read for the agent, no `gh api` of its
       # own. A failed fetch only costs the de-duplication.
-      - if: steps.seen.outputs.cache-hit != 'true' && steps.tok.outputs.present == 'true'
+      - if: steps.gate.outputs.run == 'true'
         name: Fetch the review threads already raised
         continue-on-error: true
         env:
@@ -330,7 +531,7 @@ jobs:
       # The guards come as the languette plugin. The seeded settings.json
       # enables it, but enabling installs nothing: a headless run on a bare
       # runner has no plugin cache, so the action installs it here.
-      - if: steps.seen.outputs.cache-hit != 'true' && steps.tok.outputs.present == 'true'
+      - if: steps.gate.outputs.run == 'true'
         id: review
         uses: anthropics/claude-code-action@6fed3ca145920b639991cb756090506e1bcaf515 # v1.0.245
         with:
@@ -370,7 +571,7 @@ jobs:
           # Comments cannot go inside claude_args; the action passes that
           # block through to the CLI verbatim.
           claude_args: |
-            --model "${{ inputs.model }}"
+            --model "${{ steps.triage.outputs.model }}" ${{ steps.triage.outputs.effort-arg }}
             --allowedTools "${{ inputs.allowed-tools }},Read(.writing-rubric.md),Read(.prior-threads.json)"
 
       # Proof the guards were live, read from the session's own init message
@@ -388,7 +589,7 @@ jobs:
             echo "::warning::languette plugin did not load -- this review ran without its guards"
           fi
 
-      - if: steps.seen.outputs.cache-hit != 'true' && steps.tok.outputs.present == 'true'
+      - if: steps.gate.outputs.run == 'true'
         name: Confirm a review comment actually landed
         id: posted
         env:
@@ -401,11 +602,11 @@ jobs:
           echo "posted=$([ "$n" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           [ "$n" -gt 0 ] || echo "::warning::no review comment posted; fingerprint not recorded"
 
-      - if: steps.seen.outputs.cache-hit != 'true' && steps.posted.outputs.posted == 'true'
+      - if: steps.gate.outputs.run == 'true' && steps.posted.outputs.posted == 'true'
         name: Remember that this content was reviewed
         run: echo "${{ steps.fp.outputs.id }}" > .claude-reviewed
 
-      - if: steps.seen.outputs.cache-hit != 'true' && steps.posted.outputs.posted == 'true'
+      - if: steps.gate.outputs.run == 'true' && steps.posted.outputs.posted == 'true'
         uses: actions/cache/save@v6
         with:
           path: .claude-reviewed
