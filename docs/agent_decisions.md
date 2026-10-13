@@ -14,3 +14,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261009t063954z
 - The complexity job declares no permissions and inherits the caller's grant; a caller without pull-requests: write gets a notice, not a failure Undo: declare contents: read and pull-requests: write on the job again; every caller must then grant both ([#60](https://github.com/mark-brannan/.github/pull/60))
+
+### 20261013t202807z
+- duplication leaves Markdown, plain text, JSON, lockfiles, SVG, vendor/ and node_modules/ out of both checks Undo: empty IGNORE and SKIP_* in duplication.py ([#66](https://github.com/mark-brannan/.github/pull/66))
