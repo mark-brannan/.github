@@ -26,3 +26,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261013t202850z
 - jscpd is installed with --ignore-scripts Undo: drop --ignore-scripts in duplication.yml ([#66](https://github.com/mark-brannan/.github/pull/66))
+
+### 20261013t220627z
+- claude-review labels are review:skip and review:deep only, no review:run Undo: add a review:run arm to the triage case ([#69](https://github.com/mark-brannan/.github/pull/69))
