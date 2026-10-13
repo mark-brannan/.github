@@ -37,10 +37,12 @@ name: Claude PR Review
 # A run costs real tokens, so it only happens when the pull request's
 # content has changed. `synchronize` also fires on every rebase -- and
 # Mergify keeps open pull requests up to date with main, so that is no
-# longer rare. The gate below hashes the raw tree diff (paths, modes, blob
-# ids) between the merge base and HEAD -- not `git patch-id`, which ignores
-# whitespace inside changed lines -- and remembers each fingerprint it has
-# reviewed in the Actions cache; a matching fingerprint skips the review. A
+# longer rare. The gate below hashes the pull request's own changed lines
+# between the merge base and HEAD -- not blob ids, which move whenever a PR
+# merged ahead of this one touched the same file, and not `git patch-id`,
+# which ignores whitespace inside changed lines -- and remembers each
+# fingerprint it has reviewed in the Actions cache; a matching fingerprint
+# skips the review. A
 # fingerprint is recorded only once a review comment from the bot is actually
 # on the pull request, because the action exits green even when it posted
 # nothing. The cache is the store rather than a marker in the comment because
@@ -63,6 +65,9 @@ name: Claude PR Review
 #   deep     a `review:deep` label; a risky path (anything under .github/,
 #            actions, Mergify, CODEOWNERS, hooks, settings, Dockerfiles); a diff over
 #            `deep-over-lines`. Runs on `deep-model` with `--effort deep-effort`.
+#            Escalation is paid once per pull request: once any review of it
+#            is on record, a later push escalated by path or size runs at
+#            default. Only the `review:deep` label escalates every time.
 #
 # Then, with the token in hand, a budget probe asks the plan's usage endpoint
 # how much of each rate window is used. Past `budget-pause-at` percent on any
@@ -236,10 +241,25 @@ jobs:
           auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
           echo "::add-mask::$auth"
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" fetch -q origin "$BASE"
-          raw=$(git diff-tree -r --no-commit-id "$(git merge-base "origin/$BASE" HEAD)" HEAD)
+          # The changed lines and file headers only: no `index` line (blob
+          # ids) and no `@@` line (positions), so neither shifts when main
+          # moves under an unchanged change.
+          raw=$(git -c core.quotepath=off diff --no-color --no-renames --binary -U0 \
+                  "$(git merge-base "origin/$BASE" HEAD)" HEAD | grep -vE '^(index |@@)' || true)
           if [ -n "$raw" ]; then id=$(printf '%s\n' "$raw" | sha256sum | cut -d' ' -f1); else id=empty; fi
           echo "id=$id" >> "$GITHUB_OUTPUT"
           echo "since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # An exact hit is this content, already reviewed; a prefix hit is
+      # some earlier content of this pull request, reviewed.
+      - name: Skip if this content was already reviewed
+        id: seen
+        uses: actions/cache/restore@v6
+        with:
+          path: .claude-reviewed
+          key: claude-review-pr${{ github.event.pull_request.number }}-${{ steps.fp.outputs.id }}
+          restore-keys: claude-review-pr${{ github.event.pull_request.number }}-
+          lookup-only: true
 
       # Which tier, from the labels, the author and the diff alone; the
       # path classes mirror the mixed-loops guard's design set and the review
@@ -259,6 +279,7 @@ jobs:
           SKIP_UNDER: ${{ inputs.skip-under-lines }}
           DOCS_SKIP: ${{ inputs.docs-skip-lines }}
           DEEP_OVER: ${{ inputs.deep-over-lines }}
+          PRIOR: ${{ steps.seen.outputs.cache-matched-key }}
         run: |
           set -euo pipefail
           # Labels are read live, not from the event: no create call (REST or
@@ -318,6 +339,9 @@ jobs:
             elif [ "$lines" -gt "$DEEP_OVER" ]; then
               decision=deep reason="$lines changed lines (more than $DEEP_OVER)"
             fi
+            if [ "$decision" = deep ] && [ -n "${PRIOR:-}" ]; then
+              decision=default reason="$reason; this PR already had a review, so a follow-up runs at default"
+            fi
           fi
 
           model=$DEFAULT_MODEL effort_arg=
@@ -335,14 +359,6 @@ jobs:
             echo "classes=lock=$lock design=$design docs=$docs risky=$risky code=$code"
           } >> "$GITHUB_OUTPUT"
           echo "::notice::review triage: $decision ($reason)"
-
-      - name: Skip if this content was already reviewed
-        id: seen
-        uses: actions/cache/restore@v6
-        with:
-          path: .claude-reviewed
-          key: claude-review-pr${{ github.event.pull_request.number }}-${{ steps.fp.outputs.id }}
-          lookup-only: true
 
       # Without this the action fails on every pull request in a repository
       # where the secret has not been set yet, which reads as a broken build
