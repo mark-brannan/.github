@@ -1,0 +1,115 @@
+name: duplication
+
+# Shared by every repository: the copies a pull request adds -- new clones and
+# new repeated literals, base to head -- written to the job summary. Agents add
+# a fresh copy of a helper, an opening or a regex rather than finding the
+# shared one, and review catches it late if at all. A measurement, not a gate:
+# the engine exits 0 whatever the numbers say, so callers leave this job out
+# of ci-gate's needs.
+#
+# The engine is .github/scripts/duplication.py in this repository (stdlib
+# Python); this workflow fetches it, installs jscpd and runs it, the same
+# mechanism as complexity.yml. Both sides are scanned whole, so a new copy of
+# code the PR never touched is still found. jscpd routes each file by
+# extension (an extensionless script by its shebang), so any repo in any
+# language needs no configuration. Beside it, a repeated-literal check finds
+# the same quoted string of 20+ characters in 2+ files: the one-line copy
+# under jscpd's minimum size. Every clone and literal goes in the
+# `duplication` artifact (duplication.json, kept 90 days).
+#
+# The summary is also posted on the pull request as one comment, replaced on
+# each push. Posting needs `pull-requests: write`. This job declares no
+# permissions of its own and runs with whatever the caller grants: a called
+# job that asks for more than its caller allows fails at startup, so
+# declaring the write scope here would break a caller that grants only
+# `contents: read`. Without the scope (such a caller, or a fork's read-only
+# token) the comment is skipped with a notice and the job stays green.
+#
+# jscpd is third-party, so it is pinned by version, installed without running
+# its install scripts; npm checks each package against the registry's
+# integrity hash.
+#
+#     jobs:
+#       duplication:
+#         permissions:
+#           contents: read
+#           pull-requests: write
+#         uses: mark-brannan/.github/.github/workflows/duplication.yml@main
+
+# No ref input: the engine always comes from main, except on this
+# repository's own PRs, which run the engine they carry from their checkout.
+on:
+  workflow_call:
+
+env:
+  JSCPD_VERSION: 5.4.1
+
+jobs:
+  duplication:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 2  # 9 s measured on this repo (#66); a scan past 2 min is a signal
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - if: github.repository != 'mark-brannan/.github'
+        uses: actions/checkout@v7
+        with:
+          repository: mark-brannan/.github
+          ref: main
+          sparse-checkout: |
+            /.github/scripts/duplication.py
+          sparse-checkout-cone-mode: false
+          path: .duplication-engine
+          persist-credentials: false
+      - name: Install jscpd
+        run: |
+          set -euo pipefail
+          npm install -q --prefix "$RUNNER_TEMP/jscpd" --no-audit --no-fund --ignore-scripts "jscpd@$JSCPD_VERSION"
+          echo "$RUNNER_TEMP/jscpd/node_modules/.bin" >> "$GITHUB_PATH"
+      - name: duplication
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          SELF: ${{ github.repository == 'mark-brannan/.github' }}
+        run: |
+          set -euo pipefail
+          engine=.duplication-engine/.github/scripts/duplication.py
+          if [ "$SELF" = true ]; then engine=.github/scripts/duplication.py; fi
+          echo "engine: $engine · jscpd $(jscpd --version)"
+          python3 "$engine" --base "$BASE" --require-tools \
+            --json "$RUNNER_TEMP/duplication.json" > "$RUNNER_TEMP/duplication.md"
+          tee -a "$GITHUB_STEP_SUMMARY" < "$RUNNER_TEMP/duplication.md"
+      - name: Post the summary on the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          mark='<!-- duplication-report -->'
+          body="$RUNNER_TEMP/comment.md"
+          {
+            echo "$mark"
+            cat "$RUNNER_TEMP/duplication.md"
+            echo "Every clone and literal is in the run's \`duplication\` artifact: [duplication run]($RUN_URL)"
+          } > "$body"
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq "[.[] | select(.body | startswith(\"$mark\")) | .id] | first // empty" 2>/dev/null | head -n1 || true)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$body" > /dev/null \
+              || echo "::notice::duplication: could not update comment $id; the report is in the job summary."
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@"$body" > /dev/null \
+              || echo "::notice::duplication: could not comment (needs pull-requests: write); the report is in the job summary."
+          fi
+      - name: Upload every clone and literal
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: duplication
+          path: ${{ runner.temp }}/duplication.json
+          if-no-files-found: ignore
+          retention-days: 90
