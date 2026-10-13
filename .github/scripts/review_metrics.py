@@ -44,11 +44,14 @@ import json
 import re
 import subprocess
 import sys
+import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 NAME = "review_metrics"
 sys.dont_write_bytecode = True
 BOT = "claude"  # the GraphQL login of claude[bot]
+WORKERS = 8  # log downloads in flight at once
 STAMP = re.compile(r"^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ?")
 TRIAGE = re.compile(r"^##\[notice\]review triage: (skip|default|deep) \((.*)\)\s*$")
 EFFORT = re.compile(r"^\s+claude_args: .*--effort\s+([a-z]+)")
@@ -64,19 +67,31 @@ def die(msg):
     sys.exit(2)
 
 
-def gh(*args, ok404=False):
-    # ok404 forgives 410 too: a log past the retention window is gone, not an error.
-    p = subprocess.run(["gh", *args], capture_output=True, encoding="utf-8", errors="replace")
-    if p.returncode:
-        if ok404 and ("404" in p.stderr or "410" in p.stderr):
+def gh(*args, soft=False):
+    """gh's stdout. A 404, or a 410 for a log past the retention window, is
+    None: gone, not an error. Any other failure is retried twice, then None
+    when soft (a fact the report can go without), else fatal."""
+    for attempt in range(3):
+        p = subprocess.run(["gh", *args], capture_output=True, encoding="utf-8", errors="replace")
+        if not p.returncode:
+            return p.stdout
+        if "404" in p.stderr or "410" in p.stderr:
             return None
-        die("gh %s: %s" % (" ".join(args[:3]), p.stderr.strip()))
-    return p.stdout
+        time.sleep(2 * (attempt + 1))
+    if soft:
+        print("%s: gave up on gh %s: %s" % (NAME, args[-1], p.stderr.strip()), file=sys.stderr)
+        return None
+    die("gh %s: %s" % (" ".join(args[:3]), p.stderr.strip()))
 
 
-def gh_json(*args, ok404=False):
-    out = gh(*args, ok404=ok404)
-    return None if out is None else json.loads(out)
+def gh_json(*args, soft=False):
+    out = gh(*args, soft=soft)
+    try:
+        return None if out is None else json.loads(out)
+    except ValueError:
+        if soft:
+            return None
+        die("gh %s: not JSON" % " ".join(args[:3]))
 
 
 def parse_log(text):
@@ -175,43 +190,47 @@ def threads(repo, pr):
 
 def runs_of(repo, workflow, since):
     q = "repos/%s/actions/workflows/%s/runs?per_page=100&created=%%3E%%3D%s" % (repo, workflow, since)
-    got = gh_json("api", "--paginate", "--slurp", q, ok404=True)
+    got = gh_json("api", "--paginate", "--slurp", q)
     return [r for page in (got or []) for r in page.get("workflow_runs", [])]
 
 
 def pr_of(repo, run):
     if run.get("pull_requests"):
         return run["pull_requests"][0]["number"]
-    prs = gh_json("api", "repos/%s/commits/%s/pulls" % (repo, run["head_sha"]), ok404=True) or []
+    prs = gh_json("api", "repos/%s/commits/%s/pulls" % (repo, run["head_sha"]), soft=True) or []
     if not prs:
         # A squash-merged PR's head commit is often no longer associated.
         prs = gh_json("api", "repos/%s/pulls?state=all&head=%s:%s" % (
-            repo, run["head_repository"]["owner"]["login"], run["head_branch"]), ok404=True) or []
+            repo, run["head_repository"]["owner"]["login"], run["head_branch"]), soft=True) or []
     return prs[0]["number"] if prs else None
 
 
-def collect(repo, workflow, since):
+def rows_of(repo, run):
+    jobs = (gh_json("api", "repos/%s/actions/runs/%d/jobs" % (repo, run["id"]), soft=True) or {}).get("jobs", [])
+    pr = pr_of(repo, run)
     rows = []
-    for run in runs_of(repo, workflow, since):
-        if run.get("event") != "pull_request":
-            continue
-        jobs = gh_json("api", "repos/%s/actions/runs/%d/jobs" % (repo, run["id"]))["jobs"]
-        pr = pr_of(repo, run)
-        for job in jobs:
-            log = gh("api", "--allow-escape-sequences", "repos/%s/actions/jobs/%d/logs" % (repo, job["id"]),
-                     ok404=True) or ""
-            facts = parse_log(log)
-            rows.append({"repo": repo, "pr": pr, "run": run["id"], "job": job["name"],
-                         "conclusion": job.get("conclusion") or "", "started": job.get("started_at") or "",
-                         "ended": job.get("completed_at") or "", "ran": facts["cost"] is not None, **facts})
+    for job in jobs:
+        log = gh("api", "--allow-escape-sequences", "repos/%s/actions/jobs/%d/logs" % (repo, job["id"]),
+                 soft=True)
+        facts = parse_log(log or "")
+        rows.append({"repo": repo, "pr": pr, "run": run["id"], "job": job["name"],
+                     "conclusion": (job.get("conclusion") or "") if log is not None else "log unavailable",
+                     "started": job.get("started_at") or "", "ended": job.get("completed_at") or "",
+                     "ran": facts["cost"] is not None, **facts})
     return rows
+
+
+def collect(repo, workflow, since):
+    runs = [r for r in runs_of(repo, workflow, since) if r.get("event") == "pull_request"]
+    with ThreadPoolExecutor(WORKERS) as pool:
+        return [row for rows in pool.map(lambda r: rows_of(repo, r), runs) for row in rows]
 
 
 def default_repos(owner, workflow):
     names = gh_json("repo", "list", owner, "--no-archived", "--limit", "200", "--json", "nameWithOwner")
     found = []
     for n in names:
-        if gh("api", "repos/%s/contents/.github/workflows/%s" % (n["nameWithOwner"], workflow), ok404=True):
+        if gh("api", "repos/%s/contents/.github/workflows/%s" % (n["nameWithOwner"], workflow), soft=True):
             found.append(n["nameWithOwner"])
     return found
 
