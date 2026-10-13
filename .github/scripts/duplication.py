@@ -29,14 +29,12 @@
 # Python 3 stdlib only.
 import argparse
 import hashlib
-import io
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 
 NAME = "duplication"
@@ -67,8 +65,8 @@ def die(msg):
     sys.exit(2)
 
 
-def git(*args, root):
-    p = subprocess.run(["git", *args], cwd=root, capture_output=True)
+def git(*args, root, stdin=None):
+    p = subprocess.run(["git", *args], cwd=root, input=stdin, capture_output=True)
     if p.returncode:
         die("git %s: %s" % (" ".join(args), p.stderr.decode(errors="replace").strip()))
     return p.stdout
@@ -92,29 +90,39 @@ def skipped(path):
 def materialize(root, rev, dest):
     """Write rev's whole tree under dest; {scanned name: path} for every
     regular file either check reads. A submodule has no blob, a symlink no
-    text of its own, so both are left out."""
+    text of its own, so both are left out. Blobs come from the object store,
+    not `git archive`, which drops what .gitattributes marks export-ignore."""
     files = {}
-    with tarfile.open(fileobj=io.BytesIO(git("archive", "--format=tar", rev, root=root))) as tar:
-        members = tar.getmembers()
-        real = {m.name for m in members}
-        for m in members:
-            if not m.isfile() or skipped(m.name):
-                continue
-            blob = tar.extractfile(m).read()
-            if b"\0" in blob[:8000]:
-                continue
-            name = m.name
-            if not os.path.splitext(name)[1]:
-                ext = shebang_suffix(blob[:200])
-                # `run` beside a real `run.py` keeps its own name: the literal
-                # check still reads it, jscpd does not.
-                if ext and name + ext not in real:
-                    name += ext
-            out = os.path.join(dest, name)
-            os.makedirs(os.path.dirname(out), exist_ok=True)
-            with open(out, "wb") as f:
-                f.write(blob)
-            files[name] = m.name
+    real, blobs = set(), []
+    for row in git("ls-tree", "-r", "-z", "--full-tree", rev, root=root).split(b"\0"):
+        if not row:
+            continue
+        meta, path = row.split(b"\t", 1)
+        mode, kind, sha = meta.split()
+        path = path.decode(errors="surrogateescape")
+        real.add(path)
+        if kind == b"blob" and mode != b"120000" and not skipped(path):
+            blobs.append((path, sha))
+    out = git("cat-file", "--batch", root=root, stdin=b"".join(sha + b"\n" for _, sha in blobs))
+    at = 0
+    for path, _ in blobs:
+        nl = out.index(b"\n", at)
+        size = int(out[at:nl].split()[2])
+        blob, at = out[nl + 1:nl + 1 + size], nl + 2 + size
+        if b"\0" in blob[:8000]:
+            continue
+        name = path
+        if not os.path.splitext(name)[1]:
+            ext = shebang_suffix(blob[:200])
+            # `run` beside a real `run.py` keeps its own name: the literal
+            # check still reads it, jscpd does not.
+            if ext and name + ext not in real:
+                name += ext
+        target = os.path.join(dest, name)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as f:
+            f.write(blob)
+        files[name] = path
     return files
 
 

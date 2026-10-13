@@ -130,7 +130,7 @@ class Duplication(unittest.TestCase):
         self.assertIn("tool.py", head)
 
     def test_script_beside_its_suffixed_name(self):
-        # git archive lists `run` before `run.py`; the real run.py keeps its name.
+        # `run` sorts before `run.py`; the real run.py keeps its name.
         self.write({"run": "#!/usr/bin/env python3\nDUP run\n", "run.py": "DUP real\n", "real2.py": "DUP real\n"})
         git(self.repo, "add", "run", "run.py", "real2.py")
         git(self.repo, "commit", "-qm", "run")
@@ -146,6 +146,16 @@ class Duplication(unittest.TestCase):
         git(self.repo, "commit", "-qm", "min")
         _, rep = self.run_tool()
         self.assertNotIn("a long string that a bundle repeats", {r["literal"] for r in rep["new_literals"]})
+
+    def test_export_ignore_is_still_read(self):
+        lit = '"a string that only export-ignored files hold"\n'
+        (self.repo / "tests").mkdir()
+        self.write({".gitattributes": "tests/ export-ignore\n", "tests/t.py": lit, "u.py": lit})
+        git(self.repo, "add", ".gitattributes", "tests/t.py", "u.py")
+        git(self.repo, "commit", "-qm", "export-ignore")
+        _, rep = self.run_tool()
+        lits = {r["literal"]: r["files"] for r in rep["new_literals"]}
+        self.assertEqual(lits["a string that only export-ignored files hold"], ["tests/t.py", "u.py"])
 
     def test_missing_jscpd(self):
         p, rep = self.run_tool(jscpd=False)
