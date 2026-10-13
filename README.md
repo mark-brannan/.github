@@ -13,6 +13,7 @@ workflows; the substance lives here, once.
 | `.github/workflows/complexity.yml` | `uses: mark-brannan/.github/.github/workflows/complexity.yml@main`, with `pull-requests: write`, outside `ci-gate`'s needs; posts each touched function's complexity change as a PR comment, never a gate |
 | `.github/workflows/duplication.yml` | `uses: mark-brannan/.github/.github/workflows/duplication.yml@main`, with `pull-requests: write`, outside `ci-gate`'s needs; posts the new clones and repeated literals a PR adds as a PR comment, never a gate |
 | `.github/workflows/prose-budget.yml` | `uses: mark-brannan/.github/.github/workflows/prose-budget.yml@main`; the engine is `prose-budget` in `mark-brannan/claude` (`bin/`), the config is the repository's `docs/budgets.json` or `.prose-budgets.json` |
+| `.github/scripts/review_metrics.py` | run by hand, `python3 .github/scripts/review_metrics.py --days 30` with `gh` signed in; what the `claude-review.yml` reviews cost, per run, model and tier, and what became of each comment they left (fixed, declined, ignored, judgment) |
 | `.github/actions/npm-test-prose-fallback` | `uses: mark-brannan/.github/.github/actions/npm-test-prose-fallback@main` from an `npm test` step, on a runner with no `prose-budget` engine; pair with the `prose-budget` job above, which is the real gate |
 
 Each file's header comment shows the calling snippet. A documentation gate
