@@ -60,8 +60,8 @@ name: Claude PR Review
 #            a docs-only diff under `docs-skip-lines`; any diff under
 #            `skip-under-lines` that touches no risky path.
 #   default  the caller's `model`, no effort flag: what every PR got before.
-#   deep     a `review:deep` label; a risky path (workflows, actions, Mergify,
-#            hooks, settings, Dockerfiles, .github/scripts); a diff over
+#   deep     a `review:deep` label; a risky path (anything under .github/,
+#            actions, Mergify, CODEOWNERS, hooks, settings, Dockerfiles); a diff over
 #            `deep-over-lines`. Runs on `deep-model` with `--effort deep-effort`.
 #
 # Then, with the token in hand, a budget probe asks the plan's usage endpoint
@@ -274,16 +274,19 @@ jobs:
               docs/decisions.md|docs/references.md|docs/adr/*|*.adr.md|docs/curia/*|\
               .claude/skills/curia/*|.claude/skills/agora/*)
                 design=$((design + 1)) ;;
-              .github/workflows/*|.github/actions/*|.github/scripts/*|action.yml|*/action.yml|\
-              .mergify.yml|.claude/hooks/*|.claude/settings.json|.claude/settings.*.json|\
+              .github/*|action.yml|*/action.yml|.mergify.yml|CODEOWNERS|\
+              .claude/hooks/*|.claude/settings.json|.claude/settings.*.json|\
               Dockerfile|*/Dockerfile|Dockerfile.*|*/Dockerfile.*)
                 risky=$((risky + 1)) ;;
-              *.md|*.markdown|*.txt|*.rst|LICENSE|LICENSE.*)
+              *.md|*.markdown|*.rst|LICENSE|LICENSE.*)
                 docs=$((docs + 1)) ;;
               *)
                 code=$((code + 1)) ;;
             esac
-          done < <(git diff --numstat "$mb" HEAD)
+          # --no-renames: a rename prints as `a/{old => new}/f`, which no
+          # pattern matches, so a file moved into .github/ would dodge the
+          # risky arm. quotepath=off keeps non-ASCII paths literal.
+          done < <(git -c core.quotepath=off diff --no-renames --numstat "$mb" HEAD)
 
           decision=default reason="no rule matched"
           case " $LABELS " in
@@ -302,7 +305,7 @@ jobs:
             elif [ "$risky" -eq 0 ] && [ "$SKIP_UNDER" -gt 0 ] && [ "$lines" -le "$SKIP_UNDER" ]; then
               decision=skip reason="$lines changed lines (at most $SKIP_UNDER), no risky path"
             elif [ "$risky" -gt 0 ]; then
-              decision=deep reason="$risky risky path(s): workflows, actions, Mergify, hooks, settings, scripts or Dockerfiles"
+              decision=deep reason="$risky risky path(s): anything under .github/, actions, Mergify, CODEOWNERS, hooks, settings or Dockerfiles"
             elif [ "$lines" -gt "$DEEP_OVER" ]; then
               decision=deep reason="$lines changed lines (more than $DEEP_OVER)"
             fi
@@ -393,6 +396,7 @@ jobs:
           PAUSE: ${{ steps.budget.outputs.pause }}
         run: |
           run=true outcome=$DECISION why=$REASON
+          case "${USED:-}" in ''|unknown) usage="not probed" ;; *) usage="$USED%" ;; esac
           if [ "$DECISION" = skip ]; then run=false
           elif [ "$SEEN" = true ]; then run=false outcome=skip why="this content was already reviewed (fingerprint)"
           elif [ "$TOKEN_PRESENT" != true ]; then run=false outcome=skip why="CLAUDE_CODE_OAUTH_TOKEN is not set"
@@ -408,7 +412,7 @@ jobs:
             echo "| tier | $DECISION ($REASON) |"
             echo "| model | ${MODEL:-} ${EFFORT:-} |"
             echo "| diff | $LINES lines in $FILES files; $CLASSES |"
-            echo "| plan usage | ${USED:-not probed}% |"
+            echo "| plan usage | $usage |"
           } >> "$GITHUB_STEP_SUMMARY"
       # The fail-closed PreToolUse hooks deny every Bash call unless they
       # exist under $HOME -- a bare runner never has them, so the review
