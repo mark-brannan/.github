@@ -288,21 +288,32 @@ jobs:
         run: |
           # Only the bot's own findings and replies from people with write
           # access go in; anyone can comment on a public PR. JSON, so a body
-          # cannot forge a thread boundary; each body capped, and the file.
+          # cannot forge a thread boundary. The newest threads and replies are
+          # kept, since a late reply is the one that says fixed or declined;
+          # each body is capped, and whole threads drop, oldest first, past
+          # 60 kB, so the file is always valid JSON. Written to a temp name
+          # and moved, so a failed fetch leaves no file at all.
+          set -o pipefail
           gh api graphql -F owner="${GITHUB_REPOSITORY%/*}" -F name="${GITHUB_REPOSITORY#*/}" -F pr="$PR" -f query='
             query($owner: String!, $name: String!, $pr: Int!) {
               repository(owner: $owner, name: $name) {
                 pullRequest(number: $pr) {
-                  reviewThreads(first: 100) {
+                  reviewThreads(last: 100) {
                     nodes { isResolved path line
-                      comments(first: 10) { nodes { author { login } authorAssociation body } } } } } } }' \
+                      comments(last: 10) { nodes { author { login __typename } authorAssociation body } } } } } } }' \
             --jq '[.data.repository.pullRequest.reviewThreads.nodes[]
               | {path, line, resolved: .isResolved,
                  comments: [.comments.nodes[]
-                   | select(.author.login == "claude" or (.authorAssociation | IN("OWNER", "MEMBER", "COLLABORATOR")))
+                   | select((.author.login == "claude" and .author.__typename == "Bot")
+                       or (.authorAssociation | IN("OWNER", "MEMBER", "COLLABORATOR")))
                    | {by: .author.login, body: .body[:600]}]}
-              | select(.comments | length > 0)]' \
-            | head -c 60000 > .prior-threads.json
+              | select(.comments | length > 0)]
+              | reverse
+              | reduce .[] as $t ([]; if (tojson | length) + ($t | tojson | length) > 60000 then . else . + [$t] end)
+              | reverse' \
+            > .prior-threads.tmp
+          jq -e . .prior-threads.tmp > /dev/null
+          mv .prior-threads.tmp .prior-threads.json
 
       # Pinned off v1.0.218's Claude Code 2.1.265 install: on a cold Actions
       # cache the native installer's launcher step fails silently -- exits 0,
