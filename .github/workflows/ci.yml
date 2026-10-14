@@ -86,10 +86,19 @@ jobs:
       pull-requests: write
     uses: ./.github/workflows/duplication.yml
 
+  # The review-metrics suite; parsing and classing only, no network; seconds.
+  review-metrics-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: python3 .github/scripts/review_metrics.test.py
+
   # The single required status check. `always()` lets it evaluate when a
   # dependency failed or was skipped instead of inheriting the skip.
   ci-gate:
-    needs: [nonempty, secret-scan, complexity-tests, duplication-tests]
+    needs: [nonempty, secret-scan, complexity-tests, duplication-tests, review-metrics-tests]
     if: always()
     permissions: {}
     uses: ./.github/workflows/ci-gate.yml
