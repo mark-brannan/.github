@@ -274,7 +274,8 @@ def runs_of(repo, workflow, since, until):
     while todo:
         lo, hi = todo.pop()
         span = (stamp(lo), stamp(hi - dt.timedelta(seconds=1)))
-        n = gh_json("api", q % ((repo, workflow, 1) + span))["total_count"]
+        # A repo named in --repos without the workflow is a 404: no runs.
+        n = (gh_json("api", q % ((repo, workflow, 1) + span)) or {}).get("total_count", 0)
         if n >= CAP:
             if hi - lo <= dt.timedelta(minutes=1):
                 die("%s: %d runs in the minute from %s; cannot list them whole" % (repo, n, span[0]))
@@ -603,7 +604,7 @@ def main():
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--since", help="window start, YYYY-MM-DD (UTC); overrides --days")
     ap.add_argument("--until", help="window end, YYYY-MM-DD (UTC), exclusive; default now")
-    ap.add_argument("--workflow", default="claude-code-review.yml")
+    ap.add_argument("--workflow", help="default claude-code-review.yml")
     ap.add_argument("--csv")
     ap.add_argument("--threads-csv")
     ap.add_argument("--out", help="directory for <date>-runs.csv, -threads.csv and -report.md")
@@ -647,19 +648,24 @@ def main():
                         NAME, k, meta[k], pinned, k))
         else:
             now = dt.datetime.now(dt.timezone.utc)
+            workflow = a.workflow or "claude-code-review.yml"
             meta = {"since": a.since or (now - dt.timedelta(days=a.days)).strftime("%Y-%m-%d"),
-                    "until": a.until or stamp(now), "workflow": a.workflow,
-                    "repos": asked["repos"] or default_repos(a.owner, a.workflow)}
-            if pinned:
-                with open(pinned, "w") as f:
-                    json.dump(meta, f)
+                    "until": a.until or stamp(now), "workflow": workflow,
+                    "repos": asked["repos"] or default_repos(a.owner, workflow)}
         since, repos = meta["since"], meta["repos"]
-        lo = dt.datetime.strptime(since, "%Y-%m-%d").replace(tzinfo=dt.timezone.utc)
-        hi = dt.datetime.strptime(meta["until"], "%Y-%m-%dT%H:%M:%SZ" if "T" in meta["until"] else "%Y-%m-%d") \
-            .replace(tzinfo=dt.timezone.utc)
+        try:
+            lo = dt.datetime.strptime(since, "%Y-%m-%d").replace(tzinfo=dt.timezone.utc)
+            hi = dt.datetime.strptime(meta["until"], "%Y-%m-%dT%H:%M:%SZ" if "T" in meta["until"] else "%Y-%m-%d") \
+                .replace(tzinfo=dt.timezone.utc)
+        except ValueError:
+            die("--since and --until take YYYY-MM-DD; got %s and %s" % (since, meta["until"]))
         if hi <= lo:
             die("--until %s is not after --since %s" % (meta["until"], since))
-        runs, raw = fetch(repos, a.workflow, lo, hi, a.force, keep)
+        # Pinned only once the window is good, so a bad one never sticks in DIR.
+        if pinned and not os.path.exists(pinned):
+            with open(pinned, "w") as f:
+                json.dump(meta, f)
+        runs, raw = fetch(repos, meta["workflow"], lo, hi, a.force, keep)
         if a.raw:
             taken = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             with open(a.raw, "w") as f:

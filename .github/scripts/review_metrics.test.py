@@ -8,9 +8,11 @@
 # both echoed into the log, are not mistaken for a decision; a log with
 # no result message is a run that spent nothing; each bot thread lands in the
 # class #70 defines; a thread is charged to the last paid run before it.
+import contextlib
 import csv
 import datetime as dt
 import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -277,6 +279,37 @@ class Fetch(unittest.TestCase):
             rm.fetch(["o/r"], "w.yml", lo, hi, False)
         rm.PACE = rm.Pace(10 ** 9)
         rm.fetch(["o/r"], "w.yml", lo, hi, False)
+
+    def test_a_repo_without_the_workflow_lists_no_runs(self):
+        rm.gh_json = lambda *args, soft=False: None
+        self.assertEqual(rm.runs_of("o/r", "w.yml", self.T0, self.T0 + dt.timedelta(days=1)), [])
+
+
+class Pin(unittest.TestCase):
+    """--resume DIR pins the window only once it is good, and a rerun
+    without --workflow keeps the pinned one."""
+
+    def run_main(self, *args):
+        got, saved = [], (rm.fetch, sys.argv)
+        rm.fetch = lambda repos, workflow, lo, hi, force, keep=None: got.append(workflow) or ([], [])
+        sys.argv = ["review_metrics.py", "--repos", "r", *args]
+        try:
+            rm.main()
+        finally:
+            rm.fetch, sys.argv = saved
+        return got
+
+    def test_a_bad_window_is_not_pinned(self):
+        with tempfile.TemporaryDirectory() as d:
+            for bad in (["--since", "2026-10-14", "--until", "2026-09-14"], ["--since", "2026-09-14T00:00"]):
+                with self.assertRaises(SystemExit):
+                    self.run_main("--resume", d, *bad)
+                self.assertFalse((Path(d) / "meta.json").exists())
+
+    def test_a_rerun_keeps_the_pinned_workflow(self):
+        with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(io.StringIO()):
+            self.run_main("--resume", d, "--since", "2026-09-14", "--workflow", "other.yml")
+            self.assertEqual(self.run_main("--resume", d), ["other.yml"])
 
 
 class PaceTest(unittest.TestCase):
