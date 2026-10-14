@@ -178,7 +178,7 @@ def classify(thread, pr_state):
     last = snippet(replies[-1]["body"]) if replies else ""
     m = JUDGMENT.match(first)
     if m:
-        return Verdict("judgment", "judgment", re.sub(r"^\W+", "", m.group(0)), "")
+        return Verdict("judgment", "judgment", re.sub(r"^\W+", "", m.group(0)), last)
     if thread["resolved"]:
         if thread["outdated"]:
             return Verdict("fixed", "outdated", "", last)
@@ -373,7 +373,7 @@ def thread_row(t):
             "first_line": (first["body"].splitlines() or [""])[0][:120]}
 
 
-SHEET = ["repo", "pr", "url", "path", "pr_state", "resolved", "outdated", "first_line", "replies", "human_class"]
+SHEET = ["repo", "pr", "url", "path", "at", "pr_state", "resolved", "outdated", "first_line", "replies", "human_class"]
 
 
 def sample_rows(raw, n):
@@ -392,7 +392,7 @@ def sample_rows(raw, n):
         for k in keys:
             if groups[k] and len(picked) < n:
                 picked.append(groups[k].pop())
-    return [{"repo": t["repo"], "pr": t["pr"], "url": t.get("url", ""), "path": t["path"],
+    return [{"repo": t["repo"], "pr": t["pr"], "url": t.get("url", ""), "path": t["path"], "at": t["at"],
              "pr_state": t["pr_state"], "resolved": t["resolved"], "outdated": t["outdated"],
              "first_line": (t["comments"][0]["body"].splitlines() or [""])[0][:120],
              "replies": " | ".join(snippet(c["body"]) for c in t["comments"][1:]
@@ -466,6 +466,8 @@ def main():
     a = ap.parse_args()
     if a.sample and not a.out:
         die("--sample needs --out DIR")
+    if a.out and (a.csv or a.threads_csv):
+        die("--out writes its own CSVs; drop --csv/--threads-csv")
     if a.source:
         with open(a.source) as f:
             lines = [json.loads(ln) for ln in f if ln.strip()]

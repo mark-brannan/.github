@@ -123,6 +123,7 @@ class Classify(unittest.TestCase):
         v = rm.classify(t, "MERGED")
         self.assertEqual(v.reply, ("No: the bound is inclusive " + "x" * 300)[:200])
         self.assertEqual(rm.classify(thread("x", [("solace", "Thanks")], resolved=True), "MERGED").reply, "Thanks")
+        self.assertEqual(rm.classify(thread("Judgment (risk): x", [("solace", "Keep it")]), "MERGED").reply, "Keep it")
 
 
 class Outputs(unittest.TestCase):
@@ -130,7 +131,8 @@ class Outputs(unittest.TestCase):
         out = []
         for i in range(n):
             t = thread("off by one %d" % i, [("solace", "Fixed in abc1234")] if i % 2 else (), resolved=bool(i % 2))
-            t.update({"repo": "o/r", "pr": i, "pr_state": "MERGED", "path": "a.py", "url": "https://x/%d" % i})
+            t.update({"repo": "o/r", "pr": i, "pr_state": "MERGED", "path": "a.py", "url": "https://x/%d" % i,
+                      "at": "2026-10-01T00:%02d:00Z" % i})
             out.append(t)
         return out
 
@@ -138,7 +140,7 @@ class Outputs(unittest.TestCase):
         rows = rm.sample_rows(self.raw(10), 4)
         self.assertEqual(len(rows), 4)
         self.assertEqual(sum(r["pr"] % 2 for r in rows), 2)  # both rules represented equally
-        self.assertTrue(all(r["human_class"] == "" and r["url"] for r in rows))
+        self.assertTrue(all(r["human_class"] == "" and r["url"] and r["at"] for r in rows))
         self.assertNotIn("class", rows[0])
         self.assertEqual(rows, rm.sample_rows(self.raw(10), 4))
         self.assertEqual(len(rm.sample_rows(self.raw(3), 50)), 3)
@@ -166,6 +168,13 @@ class Outputs(unittest.TestCase):
         p = subprocess.run([sys.executable, str(spec.origin), "--from", "/dev/null", "--sample", "3"],
                            capture_output=True, text=True)
         self.assertEqual(p.returncode, 2)
+
+    def test_out_with_csv_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = subprocess.run([sys.executable, str(spec.origin), "--from", "/dev/null", "--out", d,
+                                "--csv", str(Path(d) / "runs.csv")], capture_output=True, text=True)
+            self.assertEqual(p.returncode, 2)
+            self.assertEqual(list(Path(d).iterdir()), [])
 
 
 class Charge(unittest.TestCase):
