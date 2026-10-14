@@ -65,3 +65,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261014t011657z
 - review_metrics --pace sleeps a full hour on a secondary rate limit, since GitHub gives no reset time for it Undo: shorten the sleep in Pace.rest ([#74](https://github.com/mark-brannan/.github/pull/74))
+
+### 20261014t011711z
+- review_metrics --pace paces GraphQL thread reads too, though they draw on a separate budget; there are few of them Undo: skip PACE.wait for graphql calls in gh() ([#74](https://github.com/mark-brannan/.github/pull/74))
