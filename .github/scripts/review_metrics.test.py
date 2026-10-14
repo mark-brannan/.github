@@ -214,5 +214,89 @@ class Replay(unittest.TestCase):
         self.assertIn("| deep | 1 | $2.00 | $2.00 | 1 | 1 | 0 | 0 | 0 | $2.00 |", out)
 
 
+class Fetch(unittest.TestCase):
+    """The network is faked: gh_json answers from a table of runs by creation time."""
+    T0 = dt.datetime(2026, 9, 14, tzinfo=dt.timezone.utc)
+
+    def setUp(self):
+        self.saved = rm.gh_json, rm.rows_of, rm.remaining, rm.threads, rm.PACE
+        self.calls = []
+        # 2,500 runs, one a minute: a single listing would stop at CAP.
+        self.runs = [{"id": i, "created_at": rm.stamp(self.T0 + dt.timedelta(minutes=i)), "pull_requests": [],
+                      "head_branch": "b%d" % (i % 3), "head_repository": {"owner": {"login": "o"}}}
+                     for i in range(2500)]
+
+        def gh_json(*args, soft=False):
+            q = args[-1]
+            self.calls.append(q)
+            if "/pulls?" in q:
+                return [{"number": 7, "head": {"label": "o:b1"}, "created_at": "2026-09-01T00:00:00Z",
+                         "updated_at": "2026-10-01T00:00:00Z"}]
+            lo, hi = q.split("created=")[1].split("..")
+            hits = [r for r in self.runs if lo <= r["created_at"] <= hi]
+            if "per_page=1&" in q:
+                return {"total_count": len(hits)}
+            return [{"workflow_runs": hits[:rm.CAP]}]
+        rm.gh_json = gh_json
+        rm.remaining = lambda path: (5000, 0)
+        rm.threads = lambda repo, pr: ("MERGED", [])
+        rm.PACE = None
+
+    def tearDown(self):
+        rm.gh_json, rm.rows_of, rm.remaining, rm.threads, rm.PACE = self.saved
+
+    def test_a_window_past_the_cap_is_halved_until_it_lists_whole(self):
+        got = rm.runs_of("o/r", "w.yml", self.T0, self.T0 + dt.timedelta(days=2))
+        self.assertEqual([r["id"] for r in got], list(range(2500)))
+
+    def test_pr_comes_from_one_listing_by_branch(self):
+        index = rm.pr_index("o/r", self.T0)
+        self.assertEqual(rm.pr_of("o/r", self.runs[1], index), 7)
+        self.assertEqual(sum("/pulls?" in q for q in self.calls), 1)
+
+    def test_resume_reads_each_run_once(self):
+        seen = []
+        rm.rows_of = lambda repo, run, index=None: seen.append(run["id"]) or [
+            {"repo": repo, "pr": 7, "run": run["id"], "ran": False, "started": run["created_at"]}]
+        self.runs = self.runs[:5]
+        with tempfile.TemporaryDirectory() as d:
+            keep = rm.Progress(d)
+            keep.add("runs.jsonl", {"run": 0, "rows": []})
+            lo, hi = self.T0, self.T0 + dt.timedelta(days=1)
+            runs, _ = rm.fetch(["o/r"], "w.yml", lo, hi, False, keep)
+            self.assertEqual(seen, [1, 2, 3, 4])
+            self.assertEqual(len(runs), 4)
+            rm.fetch(["o/r"], "w.yml", lo, hi, False, keep)
+            self.assertEqual(seen, [1, 2, 3, 4])
+
+    def test_over_half_the_budget_refuses_unless_paced(self):
+        rm.rows_of = lambda repo, run, index=None: []
+        lo, hi = self.T0, self.T0 + dt.timedelta(days=2)
+        rm.remaining = lambda path: (1000, 0)
+        with self.assertRaises(SystemExit):
+            rm.fetch(["o/r"], "w.yml", lo, hi, False)
+        rm.PACE = rm.Pace(10 ** 9)
+        rm.fetch(["o/r"], "w.yml", lo, hi, False)
+
+
+class PaceTest(unittest.TestCase):
+    def test_spreads_calls_and_sleeps_below_the_floor(self):
+        clock, slept = [0.0], []
+        saved = rm.time.monotonic, rm.time.sleep, rm.remaining, rm.Pace.sleep_to
+        rm.time.monotonic = lambda: clock[0]
+        rm.time.sleep = lambda s: (slept.append(s), clock.__setitem__(0, clock[0] + s))
+        rm.remaining = lambda path: (rm.FLOOR - 1, 99)
+        floors = []
+        rm.Pace.sleep_to = staticmethod(lambda epoch, why: floors.append(epoch))
+        try:
+            p = rm.Pace(3600, probe="x")
+            for _ in range(rm.Pace.CHECK):
+                p.wait()
+            self.assertEqual(slept, [1.0] * (rm.Pace.CHECK - 1))
+            self.assertEqual(floors, [99])
+        finally:
+            rm.time.monotonic, rm.time.sleep, rm.remaining, rm.Pace.sleep_to = saved
+
+
 if __name__ == "__main__":
     unittest.main()
