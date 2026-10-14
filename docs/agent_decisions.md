@@ -59,3 +59,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261014t011629z
 - review_metrics --pace leaves a floor of 2,000 calls in the hourly API budget for other sessions, fixed in code rather than a flag Undo: make FLOOR a flag or change the constant ([#74](https://github.com/mark-brannan/.github/pull/74))
+
+### 20261014t011642z
+- review_metrics --pace reads the remaining budget every 100 calls, about 1% extra calls Undo: change Pace.CHECK ([#74](https://github.com/mark-brannan/.github/pull/74))
