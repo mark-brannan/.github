@@ -62,3 +62,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261014t011642z
 - review_metrics --pace reads the remaining budget every 100 calls, about 1% extra calls Undo: change Pace.CHECK ([#74](https://github.com/mark-brannan/.github/pull/74))
+
+### 20261014t011657z
+- review_metrics --pace sleeps a full hour on a secondary rate limit, since GitHub gives no reset time for it Undo: shorten the sleep in Pace.rest ([#74](https://github.com/mark-brannan/.github/pull/74))
