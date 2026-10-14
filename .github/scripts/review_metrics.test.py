@@ -8,6 +8,8 @@
 # both echoed into the log, are not mistaken for a decision; a log with
 # no result message is a run that spent nothing; each bot thread lands in the
 # class #70 defines; a thread is charged to the last paid run before it.
+import csv
+import datetime as dt
 import importlib.util
 import json
 import subprocess
@@ -53,6 +55,11 @@ review triage: skip (quoted in the body)
 }''')
 
 
+def read_csv(path):
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
 def thread(first, replies=(), resolved=False, outdated=False):
     cs = [{"author": "claude", "body": first}] + [
         {"author": a, "body": b, "bot": a.endswith("ai")} for a, b in replies]
@@ -77,28 +84,97 @@ class ParseLog(unittest.TestCase):
 
 
 class Classify(unittest.TestCase):
-    def test_classes(self):
+    def test_every_rule(self):
         cases = [
-            (thread("Judgment (risk): who may apply the label"), "MERGED", "judgment"),
-            (thread("**Judgment (values):** x", resolved=True, outdated=True), "MERGED", "judgment"),
-            (thread("off by one", resolved=True, outdated=True), "MERGED", "fixed"),
-            (thread("off by one", [("solace", "Fixed in abc1234")], resolved=True), "MERGED", "fixed"),
-            (thread("off by one", [("solace", "No: the bound is inclusive")], resolved=True), "MERGED", "declined"),
-            (thread("off by one", [("solace", "Reversal: kept, thread open")], resolved=True), "MERGED", "declined"),
-            (thread("off by one", [("solace", "Thanks")], resolved=True), "MERGED", "other"),
-            (thread("off by one", [(rm.BOT, "still applies")], resolved=True), "MERGED", "other"),
-            (thread("off by one", resolved=True), "MERGED", "other"),
-            (thread("off by one", outdated=True), "MERGED", "other"),
-            (thread("off by one", [("coderabbitai", "Agreed")], resolved=True), "MERGED", "other"),
-            (thread("off by one"), "MERGED", "ignored"),
-            (thread("off by one", [("coderabbitai", "Agreed")]), "MERGED", "ignored"),
-            (thread("off by one", [("solace", "Later")]), "MERGED", "other"),
-            (thread("off by one"), "CLOSED", "other"),
-            (thread("off by one"), "OPEN", "open"),
+            (thread("Judgment (risk): who may apply the label"), "MERGED", ("judgment", "judgment", "Judgment (")),
+            (thread("**Judgment (values):** x", resolved=True, outdated=True), "MERGED",
+             ("judgment", "judgment", "Judgment (")),
+            (thread("off by one", resolved=True, outdated=True), "MERGED", ("fixed", "outdated", "")),
+            (thread("off by one", [("solace", "Fixed in abc1234")], resolved=True), "MERGED",
+             ("fixed", "reply-says-fixed", "Fixed")),
+            (thread("off by one", [("solace", "ok, in abc1234")], resolved=True), "MERGED",
+             ("fixed", "reply-says-fixed", "in abc1234")),
+            (thread("off by one", [("solace", "No: the bound is inclusive")], resolved=True), "MERGED",
+             ("declined", "reply-disagrees", "No")),
+            (thread("off by one", [("solace", "Reversal: kept, thread open")], resolved=True), "MERGED",
+             ("declined", "reply-disagrees", "Reversal")),
+            (thread("off by one", [("solace", "Thanks")], resolved=True), "MERGED", ("other", "silent", "")),
+            (thread("off by one", [(rm.BOT, "still applies")], resolved=True), "MERGED", ("other", "silent", "")),
+            (thread("off by one", resolved=True), "MERGED", ("other", "silent", "")),
+            (thread("off by one", [("coderabbitai", "Agreed")], resolved=True), "MERGED", ("other", "silent", "")),
+            (thread("off by one", outdated=True), "MERGED", ("other", "outdated", "")),
+            (thread("off by one"), "MERGED", ("ignored", "unanswered-merged", "")),
+            (thread("off by one", [("coderabbitai", "Agreed")]), "MERGED", ("ignored", "unanswered-merged", "")),
+            (thread("off by one", [("solace", "Later")]), "MERGED", ("other", "answered-open", "")),
+            (thread("off by one"), "CLOSED", ("other", "closed-unmerged", "")),
+            (thread("off by one"), "OPEN", ("open", "open", "")),
         ]
         for t, state, want in cases:
-            with self.subTest(first=t["comments"][0]["body"], want=want):
-                self.assertEqual(rm.classify(t, state), want)
+            with self.subTest(first=t["comments"][0]["body"], state=state, want=want):
+                self.assertEqual(tuple(rm.classify(t, state))[:3], want)
+
+    def test_reply_is_the_deciding_one_else_the_last_human_one(self):
+        t = thread("off by one", [("solace", "Looking"), ("solace", "No:  the bound\nis inclusive " + "x" * 300),
+                                  ("solace", "Fixed")], resolved=True)
+        v = rm.classify(t, "MERGED")
+        self.assertEqual((v.rule, v.matched), ("reply-says-fixed", "Fixed"))
+        self.assertEqual(v.reply, "Fixed")
+        t = thread("off by one", [("solace", "No:  the bound\nis inclusive " + "x" * 300)], resolved=True)
+        v = rm.classify(t, "MERGED")
+        self.assertEqual(v.reply, ("No: the bound is inclusive " + "x" * 300)[:200])
+        self.assertEqual(rm.classify(thread("x", [("solace", "Thanks")], resolved=True), "MERGED").reply, "Thanks")
+        self.assertEqual(rm.classify(thread("Judgment (risk): x", [("solace", "Keep it")]), "MERGED").reply, "Keep it")
+
+
+class Outputs(unittest.TestCase):
+    def raw(self, n):
+        out = []
+        for i in range(n):
+            t = thread("off by one %d" % i, [("solace", "Fixed in abc1234")] if i % 2 else (), resolved=bool(i % 2))
+            t.update({"repo": "o/r", "pr": i, "pr_state": "MERGED", "path": "a.py", "url": "https://x/%d" % i,
+                      "at": "2026-10-01T00:%02d:00Z" % i})
+            out.append(t)
+        return out
+
+    def test_sample_spreads_across_rules_and_hides_the_class(self):
+        rows = rm.sample_rows(self.raw(10), 4)
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(sum(r["pr"] % 2 for r in rows), 2)  # both rules represented equally
+        self.assertTrue(all(r["human_class"] == "" and r["url"] and r["at"] for r in rows))
+        self.assertNotIn("class", rows[0])
+        self.assertEqual(rows, rm.sample_rows(self.raw(10), 4))
+        self.assertEqual(len(rm.sample_rows(self.raw(3), 50)), 3)
+
+    def test_out_writes_the_dated_files_from_a_raw_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            raw = Path(d) / "raw.jsonl"
+            t = {**self.raw(2)[1], "kind": "thread", "at": "2026-10-01T00:01:00Z", "run": 1, "model": "m",
+                 "tier": "deep", "paths": "risky"}
+            raw.write_text(json.dumps({"kind": "meta", "since": "2026-09-14"}) + "\n" + json.dumps(t) + "\n")
+            out = Path(d) / "new" / "dir"
+            subprocess.run([sys.executable, str(spec.origin), "--from", str(raw), "--out", str(out),
+                            "--sample", "5"], capture_output=True, text=True, check=True)
+            today = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+            self.assertEqual(sorted(p.name for p in out.iterdir()),
+                             ["%s-%s" % (today, k) for k in ("label-sheet.csv", "report.md", "runs.csv",
+                                                             "threads.csv")])
+            rows = read_csv(out / (today + "-threads.csv"))
+            self.assertEqual((rows[0]["rule"], rows[0]["matched"], rows[0]["reply"], rows[0]["url"]),
+                             ("reply-says-fixed", "Fixed", "Fixed in abc1234", "https://x/1"))
+            sheet = read_csv(out / (today + "-label-sheet.csv"))
+            self.assertEqual((len(sheet), sheet[0]["human_class"]), (1, ""))
+
+    def test_sample_without_out_is_refused(self):
+        p = subprocess.run([sys.executable, str(spec.origin), "--from", "/dev/null", "--sample", "3"],
+                           capture_output=True, text=True)
+        self.assertEqual(p.returncode, 2)
+
+    def test_out_with_csv_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = subprocess.run([sys.executable, str(spec.origin), "--from", "/dev/null", "--out", d,
+                                "--csv", str(Path(d) / "runs.csv")], capture_output=True, text=True)
+            self.assertEqual(p.returncode, 2)
+            self.assertEqual(list(Path(d).iterdir()), [])
 
 
 class Charge(unittest.TestCase):

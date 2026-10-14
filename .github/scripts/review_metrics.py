@@ -29,9 +29,15 @@
 # Each thread is charged to the last paid run of its PR started before it, so it
 # carries that run's model and tier.
 #
+# Each thread row also says why it got its class, so a label can be audited by
+# clicking through: rule (which test fired), matched (the word or phrase that
+# made it fire), reply (the deciding human reply, else the last one, first 200
+# characters) and url (the first comment's).
+#
 # Usage: review_metrics.py [--owner LOGIN] [--repos a,b] [--days N]
 #                          [--workflow FILE] [--csv PATH] [--threads-csv PATH]
-#                          [--raw PATH | --from PATH] [--force]
+#                          [--out DIR [--sample N]] [--raw PATH | --from PATH]
+#                          [--force]
 #
 # --repos defaults to every non-archived repo of --owner whose workflow FILE
 # (default claude-code-review.yml) exists. Markdown goes to stdout; the CSVs
@@ -39,18 +45,26 @@
 # as JSON lines: every run, and every bot thread with each comment in full,
 # its author and reactions. --from rebuilds the report from such a file with
 # no network, classing the threads by the rules as they are now, so a change
-# to the classes re-reads old data instead of fetching it again. Needs `gh`, authenticated; one log
+# to the classes re-reads old data instead of fetching it again. --out DIR writes
+# <DIR>/<YYYY-MM-DD>-runs.csv, -threads.csv and -report.md in one go (the date is
+# UTC today); DIR is the caller's to choose, and the threads carry reply text
+# that may quote private pull requests, so choose a private one. --sample N adds
+# <DIR>/<date>-label-sheet.csv: N threads spread across the rules, without the
+# script's class, and an empty human_class column for hand-labelling; join it
+# back to the threads CSV on url. Needs `gh`, authenticated; one log
 # download per run, so a 30-day window over ten repos is a few hundred calls.
 # Python 3 stdlib only.
 import argparse
 import csv
 import datetime as dt
 import json
+import os
+import random
 import re
 import subprocess
 import sys
 import time
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 from concurrent.futures import ThreadPoolExecutor
 
 NAME = "review_metrics"
@@ -139,21 +153,51 @@ def parse_log(text):
     return out
 
 
+Verdict = namedtuple("Verdict", "cls rule matched reply")
+
+
+def snippet(text):
+    return " ".join(text.split())[:200]
+
+
+def first_match(rx, comments):
+    """The first comment rx finds something in: (what it found, that comment's body), else None."""
+    for c in comments:
+        m = rx.search(c["body"])
+        if m:
+            return m.group(0), c["body"]
+    return None
+
+
 def classify(thread, pr_state):
+    """The thread's class and why: the rule that fired, the word that matched
+    (empty when the rule is a fact, not a word) and the reply that decided it,
+    else the last human reply, if any."""
     first = thread["comments"][0]["body"] if thread["comments"] else ""
     replies = [c for c in thread["comments"][1:] if c["author"] != BOT and not c.get("bot")]
-    if JUDGMENT.match(first):
-        return "judgment"
-    said_fixed = any(FIXED.search(c["body"]) for c in replies)
+    last = snippet(replies[-1]["body"]) if replies else ""
+    m = JUDGMENT.match(first)
+    if m:
+        return Verdict("judgment", "judgment", re.sub(r"^\W+", "", m.group(0)), last)
     if thread["resolved"]:
-        if thread["outdated"] or said_fixed:
-            return "fixed"
-        return "declined" if any(DECLINED.search(c["body"]) for c in replies) else "other"
+        if thread["outdated"]:
+            return Verdict("fixed", "outdated", "", last)
+        hit = first_match(FIXED, replies)
+        if hit:
+            return Verdict("fixed", "reply-says-fixed", hit[0], snippet(hit[1]))
+        hit = first_match(DECLINED, replies)
+        if hit:
+            return Verdict("declined", "reply-disagrees", hit[0], snippet(hit[1]))
+        return Verdict("other", "silent", "", last)
     if thread["outdated"]:
-        return "other"
+        return Verdict("other", "outdated", "", last)
     if pr_state == "OPEN":
-        return "open"
-    return "ignored" if pr_state == "MERGED" and not replies else "other"
+        return Verdict("open", "open", "", last)
+    if pr_state != "MERGED":
+        return Verdict("other", "closed-unmerged", "", last)
+    if not replies:
+        return Verdict("ignored", "unanswered-merged", "", "")
+    return Verdict("other", "answered-open", "", last)
 
 
 THREADS_Q = """
@@ -166,7 +210,7 @@ query($owner: String!, $name: String!, $pr: Int!, $after: String) {
         nodes { isResolved isOutdated path
           comments(first: 50) {
             pageInfo { hasNextPage }
-            nodes { author { __typename login } createdAt body
+            nodes { url author { __typename login } createdAt body
               reactionGroups { content reactors { totalCount } } } } } } } } }"""
 
 
@@ -189,7 +233,7 @@ def threads(repo, pr):
                   for c in t["comments"]["nodes"]]
             if cs and cs[0]["author"] == BOT:
                 found.append({"resolved": t["isResolved"], "outdated": t["isOutdated"], "path": t["path"],
-                              "at": cs[0]["at"], "comments": cs})
+                              "at": cs[0]["at"], "url": t["comments"]["nodes"][0]["url"], "comments": cs})
         page = p["reviewThreads"]["pageInfo"]
         if not page["hasNextPage"]:
             return p["state"], found
@@ -321,11 +365,39 @@ def write_csv(path, rows, fields):
 def thread_row(t):
     """A raw thread as the report and the CSV read it, classed now."""
     first = t["comments"][0]
+    v = classify(t, t["pr_state"])
     return {**{k: t[k] for k in ("repo", "pr", "path", "at", "run", "model", "tier", "paths")},
-            "class": classify(t, t["pr_state"]),
+            "class": v.cls, "rule": v.rule, "matched": v.matched, "reply": v.reply, "url": t.get("url", ""),
             "up": first.get("reactions", {}).get("THUMBS_UP", 0),
             "down": first.get("reactions", {}).get("THUMBS_DOWN", 0),
             "first_line": (first["body"].splitlines() or [""])[0][:120]}
+
+
+SHEET = ["repo", "pr", "url", "path", "at", "pr_state", "resolved", "outdated", "first_line", "replies", "human_class"]
+
+
+def sample_rows(raw, n):
+    """n threads for hand-labelling, dealt round-robin over the (class, rule)
+    groups so every kind of call is checked, in a fixed shuffle so a rerun on
+    the same data gives the same sheet. The script's own class is left off."""
+    rng = random.Random(0)
+    groups = defaultdict(list)
+    for t in raw:
+        v = classify(t, t["pr_state"])
+        groups[(v.cls, v.rule)].append(t)
+    for g in groups.values():
+        rng.shuffle(g)
+    keys, picked = sorted(groups), []
+    while len(picked) < n and any(groups.values()):
+        for k in keys:
+            if groups[k] and len(picked) < n:
+                picked.append(groups[k].pop())
+    return [{"repo": t["repo"], "pr": t["pr"], "url": t.get("url", ""), "path": t["path"], "at": t["at"],
+             "pr_state": t["pr_state"], "resolved": t["resolved"], "outdated": t["outdated"],
+             "first_line": (t["comments"][0]["body"].splitlines() or [""])[0][:120],
+             "replies": " | ".join(snippet(c["body"]) for c in t["comments"][1:]
+                                   if c["author"] != BOT and not c.get("bot"))[:500],
+             "human_class": ""} for t in picked]
 
 
 def remaining(path):
@@ -370,6 +442,12 @@ def fetch(repos, workflow, since, force):
     return runs, raw
 
 
+RUNS_FIELDS = ["repo", "pr", "run", "job", "conclusion", "started", "ended", "ran", "model", "effort", "tier",
+               "why", "paths", "cost", "turns", "ms"]
+THREAD_FIELDS = ["repo", "pr", "run", "at", "class", "rule", "matched", "reply", "url", "model", "tier", "paths",
+                 "path", "up", "down", "first_line"]
+
+
 def main():
     ap = argparse.ArgumentParser(prog=NAME)
     ap.add_argument("--owner", default="mark-brannan")
@@ -378,11 +456,18 @@ def main():
     ap.add_argument("--workflow", default="claude-code-review.yml")
     ap.add_argument("--csv")
     ap.add_argument("--threads-csv")
+    ap.add_argument("--out", help="directory for <date>-runs.csv, -threads.csv and -report.md")
+    ap.add_argument("--sample", type=int, metavar="N",
+                    help="with --out: also write N threads, spread across the rules, as <date>-label-sheet.csv")
     ap.add_argument("--force", action="store_true", help="spend past half the hourly API budget")
     src = ap.add_mutually_exclusive_group()
     src.add_argument("--raw", help="also write everything read, as JSON lines")
     src.add_argument("--from", dest="source", help="report from a --raw file, no network")
     a = ap.parse_args()
+    if a.sample and not a.out:
+        die("--sample needs --out DIR")
+    if a.out and (a.csv or a.threads_csv):
+        die("--out writes its own CSVs; drop --csv/--threads-csv")
     if a.source:
         with open(a.source) as f:
             lines = [json.loads(ln) for ln in f if ln.strip()]
@@ -403,13 +488,21 @@ def main():
                 for t in raw:
                     f.write(json.dumps({"kind": "thread", **t}) + "\n")
     ths = [thread_row(t) for t in raw]
-    sys.stdout.write(markdown(runs, ths, since))
-    if a.csv:
-        write_csv(a.csv, runs, ["repo", "pr", "run", "job", "conclusion", "started", "ended", "ran", "model",
-                                "effort", "tier", "why", "paths", "cost", "turns", "ms"])
-    if a.threads_csv:
-        write_csv(a.threads_csv, ths, ["repo", "pr", "run", "at", "class", "model", "tier", "paths", "path",
-                                       "up", "down", "first_line"])
+    report = markdown(runs, ths, since)
+    sys.stdout.write(report)
+    csv_path, threads_path = a.csv, a.threads_csv
+    if a.out:
+        os.makedirs(a.out, exist_ok=True)
+        stem = os.path.join(a.out, dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d"))
+        csv_path, threads_path = stem + "-runs.csv", stem + "-threads.csv"
+        with open(stem + "-report.md", "w") as f:
+            f.write(report)
+        if a.sample:
+            write_csv(stem + "-label-sheet.csv", sample_rows(raw, a.sample), SHEET)
+    if csv_path:
+        write_csv(csv_path, runs, RUNS_FIELDS)
+    if threads_path:
+        write_csv(threads_path, ths, THREAD_FIELDS)
 
 
 if __name__ == "__main__":
