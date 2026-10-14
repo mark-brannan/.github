@@ -328,12 +328,22 @@ def thread_row(t):
             "first_line": (first["body"].splitlines() or [""])[0][:120]}
 
 
+def remaining(path):
+    """Calls left this hour, read from the headers of the call about to be
+    repeated: /rate_limit and some other endpoints have reported thousands
+    left while the Actions endpoints failed at 0."""
+    p = subprocess.run(["gh", "api", "-i", path], capture_output=True, encoding="utf-8", errors="replace")
+    m = re.search(r"^x-ratelimit-remaining:\s*(\d+)", p.stdout, re.I | re.M)
+    return int(m.group(1)) if m else 0
+
+
 def fetch(repos, workflow, since, force):
     listed = {repo: [r for r in runs_of(repo, workflow, since) if r.get("event") == "pull_request"]
               for repo in repos}
     # About three REST calls a run (jobs, log, a PR lookup); threads go to GraphQL's own budget.
     need = 3 * sum(len(v) for v in listed.values())
-    left = (gh_json("api", "rate_limit") or {}).get("resources", {}).get("core", {}).get("remaining", 0)
+    first = next(((repo, rs[0]["id"]) for repo, rs in listed.items() if rs), None)
+    left = remaining("repos/%s/actions/runs/%d/jobs" % first) if first else 0
     print("%s: %d runs, about %d API calls of the %d left this hour" % (
         NAME, need // 3, need, left), file=sys.stderr)
     if need > left // 2 and not force:

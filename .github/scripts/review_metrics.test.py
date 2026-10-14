@@ -9,6 +9,10 @@
 # no result message is a run that spent nothing; each bot thread lands in the
 # class #70 defines; a thread is charged to the last paid run before it.
 import importlib.util
+import json
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -113,6 +117,25 @@ class Markdown(unittest.TestCase):
         md = rm.markdown([run], [], "2026-09-13")
         self.assertIn("| docs | 1 | $0.20 |", md)
         self.assertIn("| risky | 1 | $0.20 |", md)
+
+
+class Replay(unittest.TestCase):
+    def test_from_a_raw_file_reclasses_with_no_network(self):
+        run = {"kind": "run", "repo": "o/r", "pr": 7, "run": 1, "job": "review", "conclusion": "success",
+               "started": "2026-10-01T00:00:00Z", "ended": "", "ran": True, "model": "claude-opus-5-5",
+               "effort": "high", "tier": "deep", "why": "x", "paths": "risky", "cost": 2.0, "turns": 9, "ms": 1}
+        t = thread("off by one", [("solace", "Fixed in abc1234")], resolved=True)
+        t.update({"kind": "thread", "repo": "o/r", "pr": 7, "pr_state": "MERGED", "path": "a.py",
+                  "at": "2026-10-01T00:01:00Z", "run": 1, "model": "claude-opus-5-5", "tier": "deep",
+                  "paths": "risky"})
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            for ln in ({"kind": "meta", "since": "2026-09-14"}, run, t):
+                f.write(json.dumps(ln) + "\n")
+        out = subprocess.run([sys.executable, str(spec.origin), "--from", f.name, "--repos", "never/fetched"],
+                             capture_output=True, text=True, check=True).stdout
+        self.assertIn("since 2026-09-14", out)
+        self.assertIn("1 bot threads: 1 fixed.", out)
+        self.assertIn("| deep | 1 | $2.00 | $2.00 | 1 | 1 | 0 | 0 | 0 | $2.00 |", out)
 
 
 if __name__ == "__main__":
