@@ -31,10 +31,15 @@
 #
 # Usage: review_metrics.py [--owner LOGIN] [--repos a,b] [--days N]
 #                          [--workflow FILE] [--csv PATH] [--threads-csv PATH]
+#                          [--raw PATH | --from PATH] [--force]
 #
 # --repos defaults to every non-archived repo of --owner whose workflow FILE
 # (default claude-code-review.yml) exists. Markdown goes to stdout; the CSVs
-# hold one row per run and one per thread. Needs `gh`, authenticated; one log
+# hold one row per run and one per thread. --raw also keeps everything read,
+# as JSON lines: every run, and every bot thread with each comment in full,
+# its author and reactions. --from rebuilds the report from such a file with
+# no network, classing the threads by the rules as they are now, so a change
+# to the classes re-reads old data instead of fetching it again. Needs `gh`, authenticated; one log
 # download per run, so a 30-day window over ten repos is a few hundred calls.
 # Python 3 stdlib only.
 import argparse
@@ -51,7 +56,7 @@ from concurrent.futures import ThreadPoolExecutor
 NAME = "review_metrics"
 sys.dont_write_bytecode = True
 BOT = "claude"  # the GraphQL login of claude[bot]
-WORKERS = 8  # log downloads in flight at once
+WORKERS = 2  # log downloads in flight; GitHub's secondary rate limit trips on more
 STAMP = re.compile(r"^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ?")
 TRIAGE = re.compile(r"^##\[notice\]review triage: (skip|default|deep) \((.*)\)\s*$")
 EFFORT = re.compile(r"^\s+claude_args: .*--effort\s+([a-z]+)")
@@ -77,6 +82,9 @@ def gh(*args, soft=False):
             return p.stdout
         if "404" in p.stderr or "410" in p.stderr:
             return None
+        if "rate limit" in p.stderr.lower():
+            # Never soft: a fact dropped here would read as a run that never happened.
+            die("rate limited; the hourly API budget is shared with every session, so rerun after it resets")
         time.sleep(2 * (attempt + 1))
     if soft:
         print("%s: gave up on gh %s: %s" % (NAME, args[-1], p.stderr.strip()), file=sys.stderr)
@@ -220,8 +228,7 @@ def rows_of(repo, run):
     return rows
 
 
-def collect(repo, workflow, since):
-    runs = [r for r in runs_of(repo, workflow, since) if r.get("event") == "pull_request"]
+def collect(repo, runs):
     with ThreadPoolExecutor(WORKERS) as pool:
         return [row for rows in pool.map(lambda r: rows_of(repo, r), runs) for row in rows]
 
@@ -311,22 +318,31 @@ def write_csv(path, rows, fields):
         w.writerows(rows)
 
 
-def main():
-    ap = argparse.ArgumentParser(prog=NAME)
-    ap.add_argument("--owner", default="mark-brannan")
-    ap.add_argument("--repos", default="")
-    ap.add_argument("--days", type=int, default=30)
-    ap.add_argument("--workflow", default="claude-code-review.yml")
-    ap.add_argument("--csv")
-    ap.add_argument("--threads-csv")
-    a = ap.parse_args()
-    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=a.days)).strftime("%Y-%m-%d")
-    repos = [r if "/" in r else "%s/%s" % (a.owner, r) for r in a.repos.split(",") if r] \
-        or default_repos(a.owner, a.workflow)
-    runs, ths = [], []
+def thread_row(t):
+    """A raw thread as the report and the CSV read it, classed now."""
+    first = t["comments"][0]
+    return {**{k: t[k] for k in ("repo", "pr", "path", "at", "run", "model", "tier", "paths")},
+            "class": classify(t, t["pr_state"]),
+            "up": first.get("reactions", {}).get("THUMBS_UP", 0),
+            "down": first.get("reactions", {}).get("THUMBS_DOWN", 0),
+            "first_line": (first["body"].splitlines() or [""])[0][:120]}
+
+
+def fetch(repos, workflow, since, force):
+    listed = {repo: [r for r in runs_of(repo, workflow, since) if r.get("event") == "pull_request"]
+              for repo in repos}
+    # About three REST calls a run (jobs, log, a PR lookup); threads go to GraphQL's own budget.
+    need = 3 * sum(len(v) for v in listed.values())
+    left = (gh_json("api", "rate_limit") or {}).get("resources", {}).get("core", {}).get("remaining", 0)
+    print("%s: %d runs, about %d API calls of the %d left this hour" % (
+        NAME, need // 3, need, left), file=sys.stderr)
+    if need > left // 2 and not force:
+        die("that is more than half the hourly budget every session shares; "
+            "narrow --days or --repos, or pass --force")
+    runs, raw = [], []
     for repo in repos:
         print("%s: %s" % (NAME, repo), file=sys.stderr)
-        rs = collect(repo, a.workflow, since)
+        rs = collect(repo, listed[repo])
         runs += rs
         by_pr = defaultdict(list)
         for r in rs:
@@ -338,13 +354,45 @@ def main():
             state, found = threads(repo, pr)
             for t in found:
                 r = charge(prs, t) or {}
-                ths.append({"repo": repo, "pr": pr, "path": t["path"], "at": t["at"],
-                            "class": classify(t, state), "run": r.get("run", ""),
+                raw.append({**t, "repo": repo, "pr": pr, "pr_state": state, "run": r.get("run", ""),
                             "model": r.get("model", ""), "tier": r.get("tier", "") or "pre-triage",
-                            "paths": r.get("paths", "") or "pre-triage",
-                            "up": t["comments"][0].get("reactions", {}).get("THUMBS_UP", 0),
-                            "down": t["comments"][0].get("reactions", {}).get("THUMBS_DOWN", 0),
-                            "first_line": (t["comments"][0]["body"].splitlines() or [""])[0][:120]})
+                            "paths": r.get("paths", "") or "pre-triage"})
+    return runs, raw
+
+
+def main():
+    ap = argparse.ArgumentParser(prog=NAME)
+    ap.add_argument("--owner", default="mark-brannan")
+    ap.add_argument("--repos", default="")
+    ap.add_argument("--days", type=int, default=30)
+    ap.add_argument("--workflow", default="claude-code-review.yml")
+    ap.add_argument("--csv")
+    ap.add_argument("--threads-csv")
+    ap.add_argument("--force", action="store_true", help="spend past half the hourly API budget")
+    src = ap.add_mutually_exclusive_group()
+    src.add_argument("--raw", help="also write everything read, as JSON lines")
+    src.add_argument("--from", dest="source", help="report from a --raw file, no network")
+    a = ap.parse_args()
+    if a.source:
+        with open(a.source) as f:
+            lines = [json.loads(ln) for ln in f if ln.strip()]
+        since = next((ln["since"] for ln in lines if ln["kind"] == "meta"), "?")
+        runs = [ln for ln in lines if ln["kind"] == "run"]
+        raw = [ln for ln in lines if ln["kind"] == "thread"]
+    else:
+        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=a.days)).strftime("%Y-%m-%d")
+        repos = [r if "/" in r else "%s/%s" % (a.owner, r) for r in a.repos.split(",") if r] \
+            or default_repos(a.owner, a.workflow)
+        runs, raw = fetch(repos, a.workflow, since, a.force)
+        if a.raw:
+            taken = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            with open(a.raw, "w") as f:
+                f.write(json.dumps({"kind": "meta", "since": since, "taken": taken, "repos": repos}) + "\n")
+                for r in runs:
+                    f.write(json.dumps({"kind": "run", **r}) + "\n")
+                for t in raw:
+                    f.write(json.dumps({"kind": "thread", **t}) + "\n")
+    ths = [thread_row(t) for t in raw]
     sys.stdout.write(markdown(runs, ths, since))
     if a.csv:
         write_csv(a.csv, runs, ["repo", "pr", "run", "job", "conclusion", "started", "ended", "ran", "model",
