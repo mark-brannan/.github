@@ -34,10 +34,11 @@
 # made it fire), reply (the deciding human reply, else the last one, first 200
 # characters) and url (the first comment's).
 #
-# Usage: review_metrics.py [--owner LOGIN] [--repos a,b] [--days N]
+# Usage: review_metrics.py [--owner LOGIN] [--repos a,b]
+#                          [--days N | --since DATE [--until DATE]]
 #                          [--workflow FILE] [--csv PATH] [--threads-csv PATH]
 #                          [--out DIR [--sample N]] [--raw PATH | --from PATH]
-#                          [--force]
+#                          [--force | --pace N [--resume DIR]]
 #
 # --repos defaults to every non-archived repo of --owner whose workflow FILE
 # (default claude-code-review.yml) exists. Markdown goes to stdout; the CSVs
@@ -51,8 +52,17 @@
 # that may quote private pull requests, so choose a private one. --sample N adds
 # <DIR>/<date>-label-sheet.csv: N threads spread across the rules, without the
 # script's class, and an empty human_class column for hand-labelling; join it
-# back to the threads CSV on url. Needs `gh`, authenticated; one log
-# download per run, so a 30-day window over ten repos is a few hundred calls.
+# back to the threads CSV on url. Needs `gh`, authenticated; about two calls
+# per run (its jobs, a log per job), so a busy month runs to thousands.
+#
+# The hourly API budget is shared with every session, so a fetch that needs
+# more than half of what is left refuses. --pace N takes the long way instead:
+# one call at a time, at most N an hour spread evenly, never taking the budget
+# below FLOOR, and sleeping out a rate limit rather than failing. --resume DIR
+# keeps each run's rows and each pull request's threads as they are read and
+# pins the window and repos in DIR/meta.json, so a stopped gather reruns from
+# where it stopped. --since/--until fix the window (UTC days; --until is
+# exclusive and defaults to now); --days N means --since N days ago.
 # Python 3 stdlib only.
 import argparse
 import csv
@@ -63,6 +73,7 @@ import random
 import re
 import subprocess
 import sys
+import threading
 import time
 from collections import defaultdict, namedtuple
 from concurrent.futures import ThreadPoolExecutor
@@ -71,6 +82,8 @@ NAME = "review_metrics"
 sys.dont_write_bytecode = True
 BOT = "claude"  # the GraphQL login of claude[bot]
 WORKERS = 2  # log downloads in flight; GitHub's secondary rate limit trips on more
+CAP = 1000  # GitHub lists at most this many runs for a filtered query (#73)
+FLOOR = 2000  # calls --pace leaves in the hourly budget for every other session
 STAMP = re.compile(r"^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ?")
 TRIAGE = re.compile(r"^##\[notice\]review triage: (skip|default|deep) \((.*)\)\s*$")
 EFFORT = re.compile(r"^\s+claude_args: .*--effort\s+([a-z]+)")
@@ -89,8 +102,12 @@ def die(msg):
 def gh(*args, soft=False):
     """gh's stdout. A 404, or a 410 for a log past the retention window, is
     None: gone, not an error. Any other failure is retried twice, then None
-    when soft (a fact the report can go without), else fatal."""
-    for attempt in range(3):
+    when soft (a fact the report can go without), else fatal. Under --pace
+    a rate limit is slept out, never retried into."""
+    attempt = 0
+    while attempt < 3:
+        if PACE:
+            PACE.wait()
         p = subprocess.run(["gh", *args], capture_output=True, encoding="utf-8", errors="replace")
         if not p.returncode:
             return p.stdout
@@ -98,8 +115,12 @@ def gh(*args, soft=False):
             return None
         if "rate limit" in p.stderr.lower():
             # Never soft: a fact dropped here would read as a run that never happened.
-            die("rate limited; the hourly API budget is shared with every session, so rerun after it resets")
-        time.sleep(2 * (attempt + 1))
+            if not PACE:
+                die("rate limited; the hourly API budget is shared with every session, so rerun after it resets")
+            PACE.rest("secondary" in p.stderr.lower())
+            continue
+        attempt += 1
+        time.sleep(2 * attempt)
     if soft:
         print("%s: gave up on gh %s: %s" % (NAME, args[-1], p.stderr.strip()), file=sys.stderr)
         return None
@@ -240,26 +261,72 @@ def threads(repo, pr):
         after = page["endCursor"]
 
 
-def runs_of(repo, workflow, since):
-    q = "repos/%s/actions/workflows/%s/runs?per_page=100&created=%%3E%%3D%s" % (repo, workflow, since)
-    got = gh_json("api", "--paginate", "--slurp", q)
-    return [r for page in (got or []) for r in page.get("workflow_runs", [])]
+def stamp(t):
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def pr_of(repo, run):
+def runs_of(repo, workflow, since, until):
+    """Every pull_request run created in [since, until). GitHub silently
+    stops a filtered listing at CAP, so a window that counts CAP or more is
+    halved until each half lists whole (#73)."""
+    q = "repos/%s/actions/workflows/%s/runs?event=pull_request&per_page=%d&created=%s..%s"
+    found, todo = {}, [(since, until)]
+    while todo:
+        lo, hi = todo.pop()
+        span = (stamp(lo), stamp(hi - dt.timedelta(seconds=1)))
+        # A repo named in --repos without the workflow is a 404: no runs.
+        n = (gh_json("api", q % ((repo, workflow, 1) + span)) or {}).get("total_count", 0)
+        if n >= CAP:
+            if hi - lo <= dt.timedelta(minutes=1):
+                die("%s: %d runs in the minute from %s; cannot list them whole" % (repo, n, span[0]))
+            mid = lo + dt.timedelta(seconds=int((hi - lo).total_seconds()) // 2)
+            todo += [(mid, hi), (lo, mid)]
+            continue
+        if n:
+            got = gh_json("api", "--paginate", "--slurp", q % ((repo, workflow, 100) + span))
+            for page in got or []:
+                for r in page.get("workflow_runs", []):
+                    found[r["id"]] = r
+    return sorted(found.values(), key=lambda r: r["created_at"])
+
+
+def pr_index(repo, since):
+    """The repo's pull requests updated since `since`, by head label
+    (owner:branch), oldest first: one listing a repo instead of a lookup a
+    run, since a run's own pull_requests field is often empty."""
+    index, page = defaultdict(list), 1
+    while True:
+        got = gh_json("api", "repos/%s/pulls?state=all&sort=updated&direction=desc&per_page=100&page=%d" % (
+            repo, page), soft=True) or []
+        for p in got:
+            index[p["head"]["label"]].append((p["created_at"], p["number"]))
+        if len(got) < 100 or got[-1]["updated_at"] < stamp(since):
+            break
+        page += 1
+    for v in index.values():
+        v.sort()
+    return index
+
+
+def pr_of(repo, run, index=None):
     if run.get("pull_requests"):
         return run["pull_requests"][0]["number"]
+    owner = ((run.get("head_repository") or {}).get("owner") or {}).get("login", "")
+    # A branch name can be reused: the latest PR on it opened before the run.
+    hits = [n for at, n in (index or {}).get("%s:%s" % (owner, run["head_branch"]), []) if at <= run["created_at"]]
+    if hits:
+        return hits[-1]
     prs = gh_json("api", "repos/%s/commits/%s/pulls" % (repo, run["head_sha"]), soft=True) or []
     if not prs:
         # A squash-merged PR's head commit is often no longer associated.
         prs = gh_json("api", "repos/%s/pulls?state=all&head=%s:%s" % (
-            repo, run["head_repository"]["owner"]["login"], run["head_branch"]), soft=True) or []
+            repo, owner, run["head_branch"]), soft=True) or []
     return prs[0]["number"] if prs else None
 
 
-def rows_of(repo, run):
+def rows_of(repo, run, index=None):
     jobs = (gh_json("api", "repos/%s/actions/runs/%d/jobs" % (repo, run["id"]), soft=True) or {}).get("jobs", [])
-    pr = pr_of(repo, run)
+    pr = pr_of(repo, run, index)
     rows = []
     for job in jobs:
         log = gh("api", "--allow-escape-sequences", "repos/%s/actions/jobs/%d/logs" % (repo, job["id"]),
@@ -272,9 +339,13 @@ def rows_of(repo, run):
     return rows
 
 
-def collect(repo, runs):
-    with ThreadPoolExecutor(WORKERS) as pool:
-        return [row for rows in pool.map(lambda r: rows_of(repo, r), runs) for row in rows]
+def collect(repo, runs, index=None):
+    """(run id, its rows) for each run, in order; one at a time under --pace."""
+    with ThreadPoolExecutor(1 if PACE else WORKERS) as pool:
+        for i, (run, rows) in enumerate(zip(runs, pool.map(lambda r: rows_of(repo, r, index), runs)), 1):
+            if i % 100 == 0:
+                print("%s: %s %d/%d runs" % (NAME, repo, i, len(runs)), file=sys.stderr)
+            yield run["id"], rows
 
 
 def default_repos(owner, workflow):
@@ -406,25 +477,98 @@ def remaining(path):
     left while the Actions endpoints failed at 0."""
     p = subprocess.run(["gh", "api", "-i", path], capture_output=True, encoding="utf-8", errors="replace")
     m = re.search(r"^x-ratelimit-remaining:\s*(\d+)", p.stdout, re.I | re.M)
-    return int(m.group(1)) if m else 0
+    r = re.search(r"^x-ratelimit-reset:\s*(\d+)", p.stdout, re.I | re.M)
+    return (int(m.group(1)) if m else 0), (int(r.group(1)) if r else int(time.time()) + 3600)
 
 
-def fetch(repos, workflow, since, force):
-    listed = {repo: [r for r in runs_of(repo, workflow, since) if r.get("event") == "pull_request"]
-              for repo in repos}
-    # About three REST calls a run (jobs, log, a PR lookup); threads go to GraphQL's own budget.
-    need = 3 * sum(len(v) for v in listed.values())
+class Pace:
+    """--pace: one call at a time, per_hour of them an hour spread evenly,
+    reading the true budget every CHECK calls from probe's headers and
+    sleeping to the reset when it is below FLOOR. A primary rate limit sleeps
+    to the reset; a secondary one, whose reset GitHub does not give, an hour."""
+    CHECK = 100
+
+    def __init__(self, per_hour, probe=None):
+        self.gap, self.probe = 3600.0 / per_hour, probe
+        self.next, self.calls = 0.0, 0
+        self.lock = threading.Lock()
+
+    def wait(self):
+        with self.lock:
+            self.calls += 1
+            if self.probe and self.calls % self.CHECK == 0:
+                left, reset = remaining(self.probe)
+                if left < FLOOR:
+                    self.sleep_to(reset, "%d calls left, under the floor of %d" % (left, FLOOR))
+            now = time.monotonic()
+            if now < self.next:
+                time.sleep(self.next - now)
+            self.next = max(now, self.next) + self.gap
+
+    def rest(self, secondary):
+        if secondary or not self.probe:
+            self.sleep_to(time.time() + 3600, "secondary rate limit" if secondary else "rate limited")
+        else:
+            self.sleep_to(remaining(self.probe)[1], "rate limited")
+
+    @staticmethod
+    def sleep_to(epoch, why):
+        wake = max(epoch + 5, time.time())
+        print("%s: %s; sleeping to %s" % (NAME, why, stamp(dt.datetime.fromtimestamp(wake, dt.timezone.utc))),
+              file=sys.stderr)
+        time.sleep(wake - time.time())
+
+
+PACE = None
+
+
+class Progress:
+    """--resume DIR: a run's rows and a pull request's threads, each appended
+    as it is read, so a stopped gather skips what it already has."""
+
+    def __init__(self, d):
+        self.d = d
+        os.makedirs(d, exist_ok=True)
+
+    def load(self, name):
+        p = os.path.join(self.d, name)
+        if not os.path.exists(p):
+            return []
+        with open(p) as f:
+            return [json.loads(ln) for ln in f if ln.strip()]
+
+    def add(self, name, rec):
+        with open(os.path.join(self.d, name), "a") as f:
+            f.write(json.dumps(rec) + "\n")
+
+
+def fetch(repos, workflow, since, until, force, keep=None):
+    listed = {repo: runs_of(repo, workflow, since, until) for repo in repos}
+    have = {k["run"]: k["rows"] for k in keep.load("runs.jsonl")} if keep else {}
+    read = {(k["repo"], k["pr"]): k for k in keep.load("threads.jsonl")} if keep else {}
+    todo = {repo: [r for r in rs if r["id"] not in have] for repo, rs in listed.items()}
+    # About two REST calls a run (jobs, a log per job); pull requests come from
+    # one listing a repo, threads from GraphQL's own budget.
+    need = 2 * sum(len(v) for v in todo.values())
     first = next(((repo, rs[0]["id"]) for repo, rs in listed.items() if rs), None)
-    left = remaining("repos/%s/actions/runs/%d/jobs" % first) if first else 0
-    print("%s: %d runs, about %d API calls of the %d left this hour" % (
-        NAME, need // 3, need, left), file=sys.stderr)
-    if need > left // 2 and not force:
+    probe = "repos/%s/actions/runs/%d/jobs" % first if first else None
+    left = remaining(probe)[0] if probe else 0
+    print("%s: %d runs, %d already read; about %d API calls of the %d left this hour" % (
+        NAME, sum(len(v) for v in listed.values()), len(have), need, left), file=sys.stderr)
+    if PACE:
+        PACE.probe = probe
+    elif need > left // 2 and not force:
         die("that is more than half the hourly budget every session shares; "
-            "narrow --days or --repos, or pass --force")
+            "narrow --days or --repos, take the long way with --pace, or pass --force")
     runs, raw = [], []
     for repo in repos:
         print("%s: %s" % (NAME, repo), file=sys.stderr)
-        rs = collect(repo, listed[repo])
+        index = pr_index(repo, since) if todo[repo] else {}
+        for run_id, rows in collect(repo, todo[repo], index):
+            have[run_id] = rows
+            if keep:
+                keep.add("runs.jsonl", {"run": run_id, "rows": rows})
+        rs = [row for r in listed[repo] for row in have.get(r["id"], [])]
         runs += rs
         by_pr = defaultdict(list)
         for r in rs:
@@ -433,7 +577,12 @@ def fetch(repos, workflow, since, force):
         for pr, prs in sorted(by_pr.items()):
             if not any(r["ran"] for r in prs):
                 continue
-            state, found = threads(repo, pr)
+            if (repo, pr) in read:
+                state, found = read[(repo, pr)]["state"], read[(repo, pr)]["found"]
+            else:
+                state, found = threads(repo, pr)
+                if keep:
+                    keep.add("threads.jsonl", {"repo": repo, "pr": pr, "state": state, "found": found})
             for t in found:
                 r = charge(prs, t) or {}
                 raw.append({**t, "repo": repo, "pr": pr, "pr_state": state, "run": r.get("run", ""),
@@ -453,13 +602,17 @@ def main():
     ap.add_argument("--owner", default="mark-brannan")
     ap.add_argument("--repos", default="")
     ap.add_argument("--days", type=int, default=30)
-    ap.add_argument("--workflow", default="claude-code-review.yml")
+    ap.add_argument("--since", help="window start, YYYY-MM-DD (UTC); overrides --days")
+    ap.add_argument("--until", help="window end, YYYY-MM-DD (UTC), exclusive; default now")
+    ap.add_argument("--workflow", help="default claude-code-review.yml")
     ap.add_argument("--csv")
     ap.add_argument("--threads-csv")
     ap.add_argument("--out", help="directory for <date>-runs.csv, -threads.csv and -report.md")
     ap.add_argument("--sample", type=int, metavar="N",
                     help="with --out: also write N threads, spread across the rules, as <date>-label-sheet.csv")
     ap.add_argument("--force", action="store_true", help="spend past half the hourly API budget")
+    ap.add_argument("--pace", type=int, metavar="N", help="at most N calls an hour, one at a time; sleep out limits")
+    ap.add_argument("--resume", metavar="DIR", help="keep what is read in DIR, and skip what is already there")
     src = ap.add_mutually_exclusive_group()
     src.add_argument("--raw", help="also write everything read, as JSON lines")
     src.add_argument("--from", dest="source", help="report from a --raw file, no network")
@@ -468,6 +621,10 @@ def main():
         die("--sample needs --out DIR")
     if a.out and (a.csv or a.threads_csv):
         die("--out writes its own CSVs; drop --csv/--threads-csv")
+    if a.pace is not None and a.pace < 1:
+        die("--pace needs a positive number of calls an hour")
+    if a.force and a.pace:
+        die("--force spends at once; --pace spends slowly; pick one")
     if a.source:
         with open(a.source) as f:
             lines = [json.loads(ln) for ln in f if ln.strip()]
@@ -475,14 +632,45 @@ def main():
         runs = [ln for ln in lines if ln["kind"] == "run"]
         raw = [ln for ln in lines if ln["kind"] == "thread"]
     else:
-        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=a.days)).strftime("%Y-%m-%d")
-        repos = [r if "/" in r else "%s/%s" % (a.owner, r) for r in a.repos.split(",") if r] \
-            or default_repos(a.owner, a.workflow)
-        runs, raw = fetch(repos, a.workflow, since, a.force)
+        global PACE
+        if a.pace:
+            PACE = Pace(a.pace)
+        keep = Progress(a.resume) if a.resume else None
+        pinned = os.path.join(a.resume, "meta.json") if a.resume else None
+        asked = {"since": a.since, "until": a.until, "workflow": a.workflow,
+                 "repos": [r if "/" in r else "%s/%s" % (a.owner, r) for r in a.repos.split(",") if r]}
+        if pinned and os.path.exists(pinned):
+            with open(pinned) as f:
+                meta = json.load(f)
+            for k, v in asked.items():
+                if v and v != meta[k]:
+                    die("%s is pinned to %s=%s in %s; drop --%s or start a new --resume DIR" % (
+                        NAME, k, meta[k], pinned, k))
+        else:
+            now = dt.datetime.now(dt.timezone.utc)
+            workflow = a.workflow or "claude-code-review.yml"
+            meta = {"since": a.since or (now - dt.timedelta(days=a.days)).strftime("%Y-%m-%d"),
+                    "until": a.until or stamp(now), "workflow": workflow,
+                    "repos": asked["repos"] or default_repos(a.owner, workflow)}
+        since, repos = meta["since"], meta["repos"]
+        try:
+            lo = dt.datetime.strptime(since, "%Y-%m-%d").replace(tzinfo=dt.timezone.utc)
+            hi = dt.datetime.strptime(meta["until"], "%Y-%m-%dT%H:%M:%SZ" if "T" in meta["until"] else "%Y-%m-%d") \
+                .replace(tzinfo=dt.timezone.utc)
+        except ValueError:
+            die("--since and --until take YYYY-MM-DD; got %s and %s" % (since, meta["until"]))
+        if hi <= lo:
+            die("--until %s is not after --since %s" % (meta["until"], since))
+        # Pinned only once the window is good, so a bad one never sticks in DIR.
+        if pinned and not os.path.exists(pinned):
+            with open(pinned, "w") as f:
+                json.dump(meta, f)
+        runs, raw = fetch(repos, meta["workflow"], lo, hi, a.force, keep)
         if a.raw:
             taken = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             with open(a.raw, "w") as f:
-                f.write(json.dumps({"kind": "meta", "since": since, "taken": taken, "repos": repos}) + "\n")
+                f.write(json.dumps({"kind": "meta", "since": since, "until": meta["until"], "taken": taken,
+                                    "repos": repos}) + "\n")
                 for r in runs:
                     f.write(json.dumps({"kind": "run", **r}) + "\n")
                 for t in raw:

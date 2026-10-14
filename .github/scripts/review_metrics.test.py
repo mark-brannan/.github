@@ -8,9 +8,11 @@
 # both echoed into the log, are not mistaken for a decision; a log with
 # no result message is a run that spent nothing; each bot thread lands in the
 # class #70 defines; a thread is charged to the last paid run before it.
+import contextlib
 import csv
 import datetime as dt
 import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -212,6 +214,121 @@ class Replay(unittest.TestCase):
         self.assertIn("since 2026-09-14", out)
         self.assertIn("1 bot threads: 1 fixed.", out)
         self.assertIn("| deep | 1 | $2.00 | $2.00 | 1 | 1 | 0 | 0 | 0 | $2.00 |", out)
+
+
+class Fetch(unittest.TestCase):
+    """The network is faked: gh_json answers from a table of runs by creation time."""
+    T0 = dt.datetime(2026, 9, 14, tzinfo=dt.timezone.utc)
+
+    def setUp(self):
+        self.saved = rm.gh_json, rm.rows_of, rm.remaining, rm.threads, rm.PACE
+        self.calls = []
+        # 2,500 runs, one a minute: a single listing would stop at CAP.
+        self.runs = [{"id": i, "created_at": rm.stamp(self.T0 + dt.timedelta(minutes=i)), "pull_requests": [],
+                      "head_branch": "b%d" % (i % 3), "head_repository": {"owner": {"login": "o"}}}
+                     for i in range(2500)]
+
+        def gh_json(*args, soft=False):
+            q = args[-1]
+            self.calls.append(q)
+            if "/pulls?" in q:
+                return [{"number": 7, "head": {"label": "o:b1"}, "created_at": "2026-09-01T00:00:00Z",
+                         "updated_at": "2026-10-01T00:00:00Z"}]
+            lo, hi = q.split("created=")[1].split("..")
+            hits = [r for r in self.runs if lo <= r["created_at"] <= hi]
+            if "per_page=1&" in q:
+                return {"total_count": len(hits)}
+            return [{"workflow_runs": hits[:rm.CAP]}]
+        rm.gh_json = gh_json
+        rm.remaining = lambda path: (5000, 0)
+        rm.threads = lambda repo, pr: ("MERGED", [])
+        rm.PACE = None
+
+    def tearDown(self):
+        rm.gh_json, rm.rows_of, rm.remaining, rm.threads, rm.PACE = self.saved
+
+    def test_a_window_past_the_cap_is_halved_until_it_lists_whole(self):
+        got = rm.runs_of("o/r", "w.yml", self.T0, self.T0 + dt.timedelta(days=2))
+        self.assertEqual([r["id"] for r in got], list(range(2500)))
+
+    def test_pr_comes_from_one_listing_by_branch(self):
+        index = rm.pr_index("o/r", self.T0)
+        self.assertEqual(rm.pr_of("o/r", self.runs[1], index), 7)
+        self.assertEqual(sum("/pulls?" in q for q in self.calls), 1)
+
+    def test_resume_reads_each_run_once(self):
+        seen = []
+        rm.rows_of = lambda repo, run, index=None: seen.append(run["id"]) or [
+            {"repo": repo, "pr": 7, "run": run["id"], "ran": False, "started": run["created_at"]}]
+        self.runs = self.runs[:5]
+        with tempfile.TemporaryDirectory() as d:
+            keep = rm.Progress(d)
+            keep.add("runs.jsonl", {"run": 0, "rows": []})
+            lo, hi = self.T0, self.T0 + dt.timedelta(days=1)
+            runs, _ = rm.fetch(["o/r"], "w.yml", lo, hi, False, keep)
+            self.assertEqual(seen, [1, 2, 3, 4])
+            self.assertEqual(len(runs), 4)
+            rm.fetch(["o/r"], "w.yml", lo, hi, False, keep)
+            self.assertEqual(seen, [1, 2, 3, 4])
+
+    def test_over_half_the_budget_refuses_unless_paced(self):
+        rm.rows_of = lambda repo, run, index=None: []
+        lo, hi = self.T0, self.T0 + dt.timedelta(days=2)
+        rm.remaining = lambda path: (1000, 0)
+        with self.assertRaises(SystemExit):
+            rm.fetch(["o/r"], "w.yml", lo, hi, False)
+        rm.PACE = rm.Pace(10 ** 9)
+        rm.fetch(["o/r"], "w.yml", lo, hi, False)
+
+    def test_a_repo_without_the_workflow_lists_no_runs(self):
+        rm.gh_json = lambda *args, soft=False: None
+        self.assertEqual(rm.runs_of("o/r", "w.yml", self.T0, self.T0 + dt.timedelta(days=1)), [])
+
+
+class Pin(unittest.TestCase):
+    """--resume DIR pins the window only once it is good, and a rerun
+    without --workflow keeps the pinned one."""
+
+    def run_main(self, *args):
+        got, saved = [], (rm.fetch, sys.argv)
+        rm.fetch = lambda repos, workflow, lo, hi, force, keep=None: got.append(workflow) or ([], [])
+        sys.argv = ["review_metrics.py", "--repos", "r", *args]
+        try:
+            rm.main()
+        finally:
+            rm.fetch, sys.argv = saved
+        return got
+
+    def test_a_bad_window_is_not_pinned(self):
+        with tempfile.TemporaryDirectory() as d:
+            for bad in (["--since", "2026-10-14", "--until", "2026-09-14"], ["--since", "2026-09-14T00:00"]):
+                with self.assertRaises(SystemExit):
+                    self.run_main("--resume", d, *bad)
+                self.assertFalse((Path(d) / "meta.json").exists())
+
+    def test_a_rerun_keeps_the_pinned_workflow(self):
+        with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(io.StringIO()):
+            self.run_main("--resume", d, "--since", "2026-09-14", "--workflow", "other.yml")
+            self.assertEqual(self.run_main("--resume", d), ["other.yml"])
+
+
+class PaceTest(unittest.TestCase):
+    def test_spreads_calls_and_sleeps_below_the_floor(self):
+        clock, slept = [0.0], []
+        saved = rm.time.monotonic, rm.time.sleep, rm.remaining, rm.Pace.sleep_to
+        rm.time.monotonic = lambda: clock[0]
+        rm.time.sleep = lambda s: (slept.append(s), clock.__setitem__(0, clock[0] + s))
+        rm.remaining = lambda path: (rm.FLOOR - 1, 99)
+        floors = []
+        rm.Pace.sleep_to = staticmethod(lambda epoch, why: floors.append(epoch))
+        try:
+            p = rm.Pace(3600, probe="x")
+            for _ in range(rm.Pace.CHECK):
+                p.wait()
+            self.assertEqual(slept, [1.0] * (rm.Pace.CHECK - 1))
+            self.assertEqual(floors, [99])
+        finally:
+            rm.time.monotonic, rm.time.sleep, rm.remaining, rm.Pace.sleep_to = saved
 
 
 if __name__ == "__main__":
