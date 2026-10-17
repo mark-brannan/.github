@@ -76,6 +76,7 @@ test('report: green with no match, green when shown, red when not', () => {
   assert.ok(report({ matched: ['ui/a'], shown: { kind: 'image', found: 'x' }, urls: [] }).ok);
   const red = report({ matched: ['ui/a'], shown: { kind: null, found: '' }, urls: [] });
   assert.ok(!red.ok);
+  assert.equal(red.why, 'has no image or preview URL');
   assert.match(red.md, /`ui\/a`/);
   assert.match(red.md, /inline image/);
   assert.doesNotMatch(red.md, /link starting with/);
@@ -129,11 +130,13 @@ test('report: with serve, red without a Try it block even when shown; green with
   const img = { kind: 'image', found: 'x' };
   const red = report({ matched: ['ui/a'], shown: img, urls: [], serve: ARGS.serve, tryIt: false, block });
   assert.ok(!red.ok);
+  assert.equal(red.why, 'has no "Try it" block');
   assert.match(red.md, /show-dont-tell: red/);
   assert.match(red.md, /## Try it/);
   assert.match(red.md, /pull\/221\/head/);
   const redNone = report({ matched: ['ui/a'], shown: { kind: null, found: '' }, urls: [], serve: ARGS.serve, tryIt: false, block });
   assert.ok(!redNone.ok);
+  assert.equal(redNone.why, 'has neither an image/preview URL nor a "Try it" block');
   assert.match(redNone.md, /no picture/);
   assert.match(redNone.md, /## Try it/);
   assert.ok(report({ matched: ['ui/a'], shown: img, urls: [], serve: ARGS.serve, tryIt: true, block }).ok);

@@ -117,10 +117,13 @@ export function report({ matched, shown, urls, serve = '', tryIt = true, block =
   const list = matched.slice(0, 20).map((f) => `- \`${f}\``).join('\n') + (matched.length > 20 ? `\n- ... and ${matched.length - 20} more` : '');
   const tryItRed = serve && !tryIt;
   const tryItMsg = tryItRed ? `This repository declares a \`serve:\` command, so the description must also carry a "Try it" block: a \`## Try it\` heading followed by a command containing \`pull/N/head\` for this pull request, so the reviewer can run the page in one paste. Add this to the description (the check re-runs when it is edited):\n\n\`\`\`\`markdown\n${block}\`\`\`\`\n` : '';
-  if (shown.kind && tryItRed) return { ok: false, md: `### show-dont-tell: red\n\nThis pull request touches rendered paths:\n\n${list}\n\nThe body shows ${shown.kind === 'image' ? 'an image' : 'a preview URL'}, but has no "Try it" block.\n\n${tryItMsg}` };
-  if (shown.kind) return { ok: true, md: `### show-dont-tell\n\nRendered paths touched (${matched.length}) and the body shows ${shown.kind === 'image' ? 'an image' : 'a preview URL'}: \`${shown.found}\`\n\n${list}\n` };
+  const kind = shown.kind === 'image' ? 'an image' : 'a preview URL';
+  // `why` is the one-line reason for the red, for the ::error:: annotation.
+  if (shown.kind && tryItRed) return { ok: false, why: 'has no "Try it" block', md: `### show-dont-tell: red\n\nThis pull request touches rendered paths:\n\n${list}\n\nThe body shows ${kind}, but has no "Try it" block.\n\n${tryItMsg}` };
+  if (shown.kind) return { ok: true, md: `### show-dont-tell\n\nRendered paths touched (${matched.length}) and the body shows ${kind}: \`${shown.found}\`\n\n${list}\n` };
   const what = urls.length ? ` or a link starting with one of ${urls.map((u) => `\`${u}\``).join(', ')}` : '';
-  return { ok: false, md: `### show-dont-tell: red\n\nThis pull request touches rendered paths:\n\n${list}\n\nIts description carries no picture. Edit the description to add an inline image (\`![what it shows](url)\`, or drag a screenshot in)${what}; the check re-runs when the description is edited.\n${tryItRed ? `\n${tryItMsg}` : ''}` };
+  const why = tryItRed ? 'has neither an image/preview URL nor a "Try it" block' : 'has no image or preview URL';
+  return { ok: false, why, md: `### show-dont-tell: red\n\nThis pull request touches rendered paths:\n\n${list}\n\nIts description carries no picture. Edit the description to add an inline image (\`![what it shows](url)\`, or drag a screenshot in)${what}; the check re-runs when the description is edited.\n${tryItRed ? `\n${tryItMsg}` : ''}` };
 }
 
 function gh(...args) { return execFileSync('gh', args, { encoding: 'utf8', maxBuffer: 1 << 28 }); }
@@ -149,17 +152,19 @@ function main() {
   }
   const files = gh('api', `repos/${REPO}/pulls/${PR}/files`, '--paginate', '--jq', '.[] | .filename, (.previous_filename // empty)').split('\n').filter(Boolean);
   const matched = matchPaths(files, cfg.paths);
-  const body = matched.length ? gh('api', `repos/${REPO}/pulls/${PR}`, '--jq', '.body // ""') : '';
+  // One read of the pull: the body the check judges and the head SHA the
+  // block names come from the same response.
+  const pull = matched.length ? JSON.parse(gh('api', `repos/${REPO}/pulls/${PR}`)) : {};
+  const body = pull.body || '';
   const serve = cfg.serve || '';
   const tryIt = !serve || !matched.length || scanTryIt(body, PR);
   let block = '';
   if (serve && matched.length && !tryIt) {
-    const head = gh('api', `repos/${REPO}/pulls/${PR}`, '--jq', '.head.sha').trim();
-    block = tryItBlock({ repo: REPO, pr: PR, head, checkout: cfg.checkout || '~/' + String(REPO).split('/').pop(), install: cfg.install || '', serve });
+    block = tryItBlock({ repo: REPO, pr: PR, head: pull.head.sha, checkout: cfg.checkout || '~/' + String(REPO).split('/').pop(), install: cfg.install || '', serve });
   }
   const r = report({ matched, shown: scanBody(body, cfg.urls), urls: cfg.urls, serve, tryIt, block });
   console.log(r.md);
-  if (!r.ok) console.error(`::error::show-dont-tell: rendered paths touched, but the PR description has no ${serve && !tryIt ? '"Try it" block (or no ' : ''}image or preview URL${serve && !tryIt ? ')' : ''}.`);
+  if (!r.ok) console.error(`::error::show-dont-tell: rendered paths touched, but the PR description ${r.why}.`);
   return r.ok ? 0 : 1;
 }
 

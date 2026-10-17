@@ -26,7 +26,7 @@ name: show-dont-tell
 #       - "screenshots/goldens/**"
 #     urls:                # optional: prefixes of this repo's preview URLs
 #       - https://preview.example.com/
-#     checkout: ~/searoom  # optional: the user's local clone; the Try it block is written against it
+#     checkout: ~/searoom  # optional, default ~/<repo name>: the user's local clone; the Try it block is written against it
 #     install: npm ci      # optional: omitted from the block when empty
 #     serve: npm run dev -- --strictPort --port {port}   # {port} = 10000 + PR number
 #
