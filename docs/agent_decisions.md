@@ -71,3 +71,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261017t022328z
 - Grade thresholds default to SSIM 0.80 for large and 0.95 for medium, read off one spike (claude_prompts_scratch drafts/2026-10-17-goldens-score-spike.md); they are workflow inputs. Undo: change the large-ssim / medium-ssim defaults in golden-diff.yml and golden-diff.mjs ([#77](https://github.com/mark-brannan/.github/pull/77))
+
+### 20261017t022330z
+- Any size change grades large, and the pair is still scored on its top-aligned overlap (common width x min height, no resampling). Undo: drop the sizeChanged clause in grade() and the cropTop scoring in scorePair() ([#77](https://github.com/mark-brannan/.github/pull/77))
