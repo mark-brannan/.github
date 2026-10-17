@@ -26,6 +26,19 @@ name: show-dont-tell
 #       - "screenshots/goldens/**"
 #     urls:                # optional: prefixes of this repo's preview URLs
 #       - https://preview.example.com/
+#     checkout: ~/searoom  # optional: the user's local clone; the Try it block is written against it
+#     install: npm ci      # optional: omitted from the block when empty
+#     serve: npm run dev -- --strictPort --port {port}   # {port} = 10000 + PR number
+#
+# A repository that sets `serve:` also owes a "Try it" block: when a rendered
+# path is touched, the description must carry a `## Try it` heading followed
+# by text containing `pull/<N>/head` for this PR's N, else the check is red,
+# in addition to the picture-or-URL rule below. Why: the thing to show in a
+# UX repo is the running page, and one paste (fetch the PR head, move a
+# detached worktree, install, serve on port 10000 + N) beats rebuilding it by
+# hand. The red summary prints the block rendered from the fields above, with
+# the PR's head SHA, so an agent pastes it into the description. Without
+# `serve:` the check behaves as before.
 #
 # What satisfies the check: an inline image anywhere in the description
 # (`![..](..)`, `<img src=..>`, a github.com/user-attachments upload), or a
