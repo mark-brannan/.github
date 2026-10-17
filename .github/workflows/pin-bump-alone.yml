@@ -10,8 +10,8 @@ name: pin-bump-alone
 # the worked example.
 #
 # Fails when the PR's diff against its base (from the merge base) changes
-# the lockfile's `resolved` for `package` AND touches a path outside
-# `allow`. A PR that leaves the pin alone always passes.
+# the lockfile's `resolved` for any of `packages` AND touches a path
+# outside `allow`. Two pins moving together still pass: each is a pin bump. A PR that leaves the pin alone always passes.
 #
 # Bypass is the `pin-bump-mixed-ok` label, applied by a human. Labels are
 # read from the API at run time, not from the event payload, so re-running
@@ -24,7 +24,8 @@ name: pin-bump-alone
 #       pull-requests: read
 #     uses: mark-brannan/.github/.github/workflows/pin-bump-alone.yml@main
 #     with:
-#       package: colregs
+#       packages: |
+#         colregs
 #       allow: |
 #         src/generated/**
 #         test/**
@@ -32,8 +33,8 @@ name: pin-bump-alone
 on:
   workflow_call:
     inputs:
-      package:
-        description: "The npm dependency whose pin moves alone"
+      packages:
+        description: "Newline-separated npm dependencies whose pins move alone"
         required: true
         type: string
       allow:
@@ -59,7 +60,7 @@ jobs:
           # Through env, never interpolated into the script.
           BASE: ${{ github.event.pull_request.base.ref }}
           PR: ${{ github.event.pull_request.number }}
-          PKG: ${{ inputs.package }}
+          PKGS: ${{ inputs.packages }}
           ALLOW: ${{ inputs.allow }}
           GH_TOKEN: ${{ github.token }}
           LABEL: pin-bump-mixed-ok
@@ -69,18 +70,24 @@ jobs:
             echo "not a pull request: nothing to compare"
             exit 0
           fi
-          git fetch -q --no-tags origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"
           mb=$(git merge-base "origin/$BASE" HEAD)
 
           resolved() {
             git show "$1:package-lock.json" 2>/dev/null \
-              | jq -r --arg k "node_modules/$PKG" '.packages[$k].resolved // empty' \
+              | jq -r --arg k "node_modules/$2" '.packages[$k].resolved // empty' \
               || true
           }
-          before=$(resolved "$mb")
-          after=$(resolved HEAD)
-          if [ "$before" = "$after" ]; then
-            echo "ok: the $PKG pin does not move here"
+          moved=""
+          while IFS= read -r pkg; do
+            [ -n "$pkg" ] || continue
+            before=$(resolved "$mb" "$pkg")
+            after=$(resolved HEAD "$pkg")
+            [ "$before" = "$after" ] && continue
+            echo "the $pkg pin moves: $before -> $after"
+            moved+="${moved:+, }$pkg"
+          done <<< "$PKGS"
+          if [ -z "$moved" ]; then
+            echo "ok: no listed pin moves here"
             exit 0
           fi
 
@@ -90,11 +97,10 @@ jobs:
           done <<< "$ALLOW"
           outside=$(git diff --name-only "$mb" HEAD -- "${specs[@]}")
           if [ -z "$outside" ]; then
-            echo "ok: the $PKG pin moves ($before -> $after) and nothing else does"
+            echo "ok: the $moved pin moves and nothing else does"
             exit 0
           fi
 
-          echo "the $PKG pin moves: $before -> $after"
           echo "paths outside a pin bump's reach:"
           printf '%s\n' "$outside" | sed 's/^/  /'
 
@@ -102,11 +108,11 @@ jobs:
           # annotation on a green step.
           if gh api "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '.[].name' \
             | grep -qxF "$LABEL"; then
-            echo "::notice::a $PKG pin bump mixed with other work -- allowed by the $LABEL label"
+            echo "::notice::a $moved pin bump mixed with other work -- allowed by the $LABEL label"
             exit 0
           fi
 
-          echo "::error::a $PKG pin bump mixed with other work"
+          echo "::error::a $moved pin bump mixed with other work"
           echo "Split it: the pin bump and what its data forces land alone; the rest follows."
           echo "Bypass is the $LABEL label, a human's to apply."
           exit 1
