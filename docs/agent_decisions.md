@@ -80,3 +80,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261017t022335z
 - The engine is fetched at github.job_workflow_sha, the commit the called workflow file came from, with no ref input. Undo: add a ref input to golden-diff.yml and pass it to the engine checkout ([#77](https://github.com/mark-brannan/.github/pull/77))
+
+### 20261017t022338z
+- No Dependabot npm entry for .github/scripts/golden-diff/, so pngjs, pixelmatch and ssim.js stay at the versions the spike measured. Undo: add an npm entry for /.github/scripts/golden-diff to dependabot.yml ([#77](https://github.com/mark-brannan/.github/pull/77))
