@@ -59,8 +59,9 @@ const IMAGE = [
 // attribution link (https://claude.com/claude-code) in every agent-written body.
 export function scanBody(body, urls = []) {
   const text = body || '';
-  // Code spans and fences only describe a picture; they do not show one.
-  const shown = text.replace(/```[\s\S]*?```|`[^`\n]*`/g, '');
+  // Code spans, fences and HTML comments (a template's "drop a screenshot
+  // here" hint) only describe a picture; they do not show one.
+  const shown = text.replace(/```[\s\S]*?```|`[^`\n]*`|<!--[\s\S]*?-->/g, '');
   for (const re of IMAGE) {
     const m = re.exec(shown);
     if (m) return { kind: 'image', found: m[0] };
