@@ -74,3 +74,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261017t022330z
 - Any size change grades large, and the pair is still scored on its top-aligned overlap (common width x min height, no resampling). Undo: drop the sizeChanged clause in grade() and the cropTop scoring in scorePair() ([#77](https://github.com/mark-brannan/.github/pull/77))
+
+### 20261017t022333z
+- The report is posted as one sticky PR comment on every grade, noise included, and an earlier comment is updated to say none when a later push changes no golden. Undo: skip the POST when the headline grade is noise in the Post step of golden-diff.yml ([#77](https://github.com/mark-brannan/.github/pull/77))
