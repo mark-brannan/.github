@@ -68,3 +68,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261014t011711z
 - review_metrics --pace paces GraphQL thread reads too, though they draw on a separate budget; there are few of them Undo: skip PACE.wait for graphql calls in gh() ([#74](https://github.com/mark-brannan/.github/pull/74))
+
+### 20261017t022328z
+- Grade thresholds default to SSIM 0.80 for large and 0.95 for medium, read off one spike (claude_prompts_scratch drafts/2026-10-17-goldens-score-spike.md); they are workflow inputs. Undo: change the large-ssim / medium-ssim defaults in golden-diff.yml and golden-diff.mjs ([#77](https://github.com/mark-brannan/.github/pull/77))
