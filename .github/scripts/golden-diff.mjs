@@ -224,11 +224,24 @@ function strip(oldPng, newPng, diffPng) {
   return out;
 }
 
-const fileStem = (path) => path.replace(/\.png$/i, '').split('/').join('__');
+// Output file name for a golden: its path with `/` as `__`; control characters
+// and backslashes, legal in a git path, become `_` on disk.
+const fileStem = (path) => path.replace(/\.png$/i, '').split('/').join('__').replace(/[\x00-\x1f\x7f\\]/g, '_');
 
 // --- report ----------------------------------------------------------------
 
 const RANK = { large: 3, medium: 2, noise: 1 };
+
+// A file name or message as one markdown table cell: control characters
+// replaced, `|` escaped, the whole in a code span fenced longer than any
+// backtick run inside it, so a path in the PR cannot forge a row or markup.
+export function cell(text) {
+  const clean = String(text).replace(/[\x00-\x1f\x7f]/g, '\uFFFD').replace(/\|/g, '\\|');
+  const runs = (clean.match(/`+/g) || []).map((r) => r.length);
+  const fence = '`'.repeat(Math.max(0, ...runs) + 1);
+  const pad = clean.startsWith('`') || clean.endsWith('`') ? ' ' : '';
+  return `${fence}${pad}${clean}${pad}${fence}`;
+}
 const fmtSize = (p) => `${p.width}×${p.height}`;
 const pct = (x, d) => `${(100 * x).toFixed(d)}%`;
 const f3 = (x) => x.toFixed(3);
@@ -249,7 +262,7 @@ export function report(images, headline, opts) {
   const lines = [];
   if (!images.length) {
     lines.push('## Goldens moved by this PR: none', '',
-      `No PNG under \`${opts.paths}\` differs from the merge base.`, '');
+      `No PNG under ${cell(opts.paths)} differs from the merge base.`, '');
     return lines.join('\n');
   }
   const counts = ['modified', 'added', 'removed'].filter((k) => headline[k]).map((k) => `${headline[k]} ${k}`).join(', ');
@@ -257,9 +270,9 @@ export function report(images, headline, opts) {
   lines.push(`## Goldens moved by this PR: ${headline.grade}   (${counts}${tail})`, '',
     '| golden | change | size | pixels | SSIM | regions | box union | grade |', '|---|---|---|---|---|---|---|---|');
   for (const i of images) {
-    const name = i.path.replace(/\.png$/i, '');
+    const name = cell(i.path.replace(/\.png$/i, ''));
     if (i.status === 'modified' && i.error) {
-      lines.push(`| ${name} | modified | unreadable: ${i.error} | | | | | ${i.grade} |`);
+      lines.push(`| ${name} | modified | unreadable: ${cell(i.error)} | | | | | ${i.grade} |`);
     } else if (i.status === 'modified') {
       const size = i.sizeChanged ? `${fmtSize(i.old)} → ${fmtSize(i.new)}` : fmtSize(i.new);
       lines.push(`| ${name} | modified | ${size} | ${pct(i.diffFrac, 1)} | ${f3(i.ssim)} | ${i.regions} | ${pct(i.bboxUnionFrac, 0)} | ${i.grade} |`);

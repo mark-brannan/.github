@@ -16,7 +16,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, before, beforeEach, test } from 'node:test';
 import { PNG } from './golden-diff/deps.mjs';
-import { globToRegExp } from './golden-diff.mjs';
+import { cell, globToRegExp } from './golden-diff.mjs';
 
 const ENGINE = join(dirname(fileURLToPath(import.meta.url)), 'golden-diff.mjs');
 
@@ -95,7 +95,7 @@ test('same pixels in different bytes is noise with SSIM 1', () => {
   assert.equal(i.ssim, 1);
   assert.equal(i.regions, 0);
   assert.equal(r.headline.grade, 'noise');
-  assert.match(r.md, /\| test\/golden\/same \| modified \| 100×80 \| 0\.0% \| 1\.000 \| 0 \| 0% \| noise \|/);
+  assert.match(r.md, /\| `test\/golden\/same` \| modified \| 100×80 \| 0\.0% \| 1\.000 \| 0 \| 0% \| noise \|/);
 });
 
 test('a moved block grades by the thresholds: medium between them, large below large-ssim', () => {
@@ -129,7 +129,7 @@ test('a size change is large and still reports the overlap metrics', () => {
   assert.deepEqual(i.overlap, { width: 100, height: 100 });
   assert.equal(i.ssim, 1);
   assert.equal(i.diffFrac, 0);
-  assert.match(r.md, /\| test\/golden\/grown \| modified \| 100×100 → 100×140 \| 0\.0% \| 1\.000 \| 0 \| 0% \| large \|/);
+  assert.match(r.md, /\| `test\/golden\/grown` \| modified \| 100×100 → 100×140 \| 0\.0% \| 1\.000 \| 0 \| 0% \| large \|/);
   const strip = PNG.sync.read(readFileSync(join(r.out, 'test__golden__grown-strip.png')));
   assert.equal(strip.height, 140);
 });
@@ -147,8 +147,8 @@ test('added and removed are listed, not scored; alone they make the headline new
   assert.equal(by['test/golden/fresh.png'].ssim, undefined);
   assert.equal(by['test/golden/gone.png'].grade, 'removed');
   assert.match(r.md, /^## Goldens moved by this PR: new   \(1 added, 1 removed\)$/m);
-  assert.match(r.md, /\| test\/golden\/fresh \| added \| 30×30 \| \| \| \| \| new \|/);
-  assert.match(r.md, /\| test\/golden\/gone \| removed \| 50×50 \| \| \| \| \| removed \|/);
+  assert.match(r.md, /\| `test\/golden\/fresh` \| added \| 30×30 \| \| \| \| \| new \|/);
+  assert.match(r.md, /\| `test\/golden\/gone` \| removed \| 50×50 \| \| \| \| \| removed \|/);
   assert.ok(existsSync(join(r.out, 'test__golden__fresh-new.png')));
   assert.ok(existsSync(join(r.out, 'test__golden__gone-old.png')));
   assert.ok(!existsSync(join(r.out, 'test__golden__gone-diff.png')));
@@ -169,7 +169,7 @@ test('the headline is the worst modified image; the table has one row per golden
   assert.equal(lines[2], '| golden | change | size | pixels | SSIM | regions | box union | grade |');
   assert.equal(lines[3], '|---|---|---|---|---|---|---|---|');
   assert.deepEqual(lines.slice(4, 7).map((l) => l.split(' | ')[0].slice(2)),
-    ['test/golden/fresh', 'test/golden/grown', 'test/golden/same']);
+    ['`test/golden/fresh`', '`test/golden/grown`', '`test/golden/same`']);
   assert.match(lines[8], /^large = SSIM < 0\.80 or a size change · medium = SSIM < 0\.95 · else noise \(pencil/);
 });
 
@@ -182,6 +182,22 @@ test('globs select: a PNG outside them is not a row; a nested one under ** is', 
   assert.ok(existsSync(join(r.out, 'test__golden__sub__deep-strip.png')));
   const narrow = run(['--paths', 'docs/*.png']);
   assert.deepEqual(narrow.images.map((i) => i.path), ['docs/shot.png']);
+});
+
+test('a path with | and a backtick cannot forge a table row', () => {
+  const wild = 'test/golden/a|b`c.png';
+  put(wild, png(20, 20));
+  commit('wild name');
+  const r = run();
+  assert.equal(r.images[0].path, wild);
+  const row = r.md.split('\n').find((l) => l.includes('a\\|b'));
+  assert.ok(row, r.md);
+  assert.equal(row, '| ``test/golden/a\\|b`c`` | added | 20×20 | | | | | new |');
+  assert.equal(row.split(/(?<!\\)\|/).length, 10, 'eight cells');
+  assert.ok(existsSync(join(r.out, 'test__golden__a|b`c-new.png')));
+  assert.equal(cell('x\ny\x00z'), '`x\uFFFDy\uFFFDz`');
+  assert.equal(cell('`tick'), '`` `tick ``');
+  assert.equal(cell('plain'), '`plain`');
 });
 
 test('--summary appends the report', () => {
