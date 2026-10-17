@@ -175,7 +175,8 @@ export function scoreSameSize(a, b) {
   const regs = components(dilate(bits, w, h, DILATE), w, h);
   const union = regs.length ? bboxUnionArea(regs, w, h) : 0;
   const bboxArea = (r) => (r.x1 - r.x0 + 1) * (r.y1 - r.y0 + 1);
-  const largest = regs.length ? Math.max(...regs.map(bboxArea)) : 0;
+  // A fold, not a spread into Math.max: a scattered-noise full page yields > 1e5 regions, past the argument limit.
+  const largest = regs.reduce((m, r) => Math.max(m, bboxArea(r)), 0);
   const { mssim } = ssim({ data: a.data, width: w, height: h }, { data: b.data, width: w, height: h });
   const picture = new PNG({ width: w, height: h });
   pixelmatch(a.data, b.data, picture.data, w, h, { threshold: PM_THRESHOLD, includeAA: false });
@@ -209,7 +210,7 @@ function blit(dst, src, x0) {
 function strip(oldPng, newPng, diffPng) {
   const panes = [oldPng, newPng, diffPng];
   const w = panes.reduce((n, p) => n + p.width, 0) + GUTTER * (panes.length - 1);
-  const h = Math.max(...panes.map((p) => p.height));
+  const h = panes.reduce((m, p) => Math.max(m, p.height), 0);
   const out = new PNG({ width: w, height: h });
   for (let i = 0; i < w * h; i++) out.data.set([235, 235, 235, 255], i * 4);
   let x = 0;
@@ -238,7 +239,7 @@ const RANK = { large: 3, medium: 2, noise: 1 };
 export function cell(text) {
   const clean = String(text).replace(/[\x00-\x1f\x7f]/g, '\uFFFD').replace(/\|/g, '\\|');
   const runs = (clean.match(/`+/g) || []).map((r) => r.length);
-  const fence = '`'.repeat(Math.max(0, ...runs) + 1);
+  const fence = '`'.repeat(runs.reduce((m, n) => Math.max(m, n), 0) + 1);
   const pad = clean.startsWith('`') || clean.endsWith('`') ? ' ' : '';
   return `${fence}${pad}${clean}${pad}${fence}`;
 }
@@ -255,7 +256,8 @@ export function headlineOf(images) {
   if (modified.length) grade = modified.reduce((g, i) => (RANK[i.grade] > RANK[g] ? i.grade : g), 'noise');
   else if (images.length) grade = 'new';
   const ssims = modified.map((i) => i.ssim).filter((s) => typeof s === 'number');
-  return { grade, minSsim: ssims.length ? Math.min(...ssims) : null, changed: images.length, ...counts };
+  const minSsim = ssims.length ? ssims.reduce((m, x) => Math.min(m, x), 1) : null;
+  return { grade, minSsim, changed: images.length, ...counts };
 }
 
 export function report(images, headline, opts) {

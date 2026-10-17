@@ -184,6 +184,38 @@ test('globs select: a PNG outside them is not a row; a nested one under ** is', 
   assert.deepEqual(narrow.images.map((i) => i.path), ['docs/shot.png']);
 });
 
+// A grey-noise w x h PNG (deterministic LCG); with `dots`, every pixel on a
+// 6 px grid is shifted by 40, which pixelmatch counts and SSIM barely sees.
+function noise(w, h, dots) {
+  const img = new PNG({ width: w, height: h });
+  let seed = 12345;
+  for (let i = 0; i < w * h; i++) {
+    seed = (seed * 1103515245 + 12345) >>> 0;
+    let v = (seed >>> 16) & 255;
+    if (dots && (i % w) % 6 === 0 && Math.floor(i / w) % 6 === 0) v = v > 127 ? v - 40 : v + 40;
+    img.data.set([v, v, v, 255], i * 4);
+  }
+  return PNG.sync.write(img, { deflateLevel: 0 });
+}
+
+test('150k scattered changed pixels score as noise rather than throwing', () => {
+  // 2400 x 2250 on a 6 px grid is 150,000 regions after dilation, past the
+  // ~1.2e5 arguments a spread into Math.max survives.
+  put('test/golden/speckle.png', noise(2400, 2250, false));
+  commit('speckle base');
+  git('branch', '-f', 'speckle-base');
+  put('test/golden/speckle.png', noise(2400, 2250, true));
+  commit('speckle');
+  const r = run(['--base', 'speckle-base']);
+  const [i] = r.images;
+  assert.equal(i.error, undefined);
+  assert.ok(i.regions >= 130000, `regions ${i.regions}`);
+  assert.equal(i.grade, 'noise');
+  assert.ok(i.ssim >= 0.95, `ssim ${i.ssim}`);
+  assert.ok(i.largestBboxFrac > 0 && i.largestBboxFrac < 0.001);
+  for (const k of ['old', 'new', 'diff', 'strip']) assert.ok(existsSync(join(r.out, `test__golden__speckle-${k}.png`)), k);
+});
+
 test('a path with | and a backtick cannot forge a table row', () => {
   const wild = 'test/golden/a|b`c.png';
   put(wild, png(20, 20));
