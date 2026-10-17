@@ -49,11 +49,10 @@ test('scanBody: images count anywhere', () => {
   assert.equal(scanBody('https://user-images.githubusercontent.com/1/a.png').kind, 'image');
 });
 
-test('scanBody: default preview URL is any https link off github.com', () => {
-  assert.equal(scanBody('see https://pr-4.preview.example.com/x').kind, 'url');
+test('scanBody: without urls, no link counts, the agent attribution link least of all', () => {
+  assert.equal(scanBody('see https://pr-4.preview.example.com/x').kind, null);
+  assert.equal(scanBody('🤖 Generated with [Claude Code](https://claude.com/claude-code)').kind, null);
   assert.equal(scanBody('see https://github.com/o/r/actions/runs/1').kind, null);
-  assert.equal(scanBody('see https://gist.github.com/o/1').kind, null);
-  assert.equal(scanBody('see http://insecure.example.com').kind, null);
   assert.equal(scanBody('').kind, null);
   assert.equal(scanBody(null).kind, null);
 });
@@ -61,6 +60,8 @@ test('scanBody: default preview URL is any https link off github.com', () => {
 test('scanBody: with urls, only those prefixes count', () => {
   const urls = ['https://preview.example.com/'];
   assert.equal(scanBody('https://other.example.org/x', urls).kind, null);
+  assert.equal(scanBody('https://claude.com/claude-code', urls).kind, null);
+  assert.equal(scanBody('see http://preview.example.com/pr/4', urls).kind, null);
   assert.equal(scanBody('https://preview.example.com/pr/4', urls).kind, 'url');
 });
 
@@ -72,4 +73,6 @@ test('report: green with no match, green when shown, red when not', () => {
   assert.ok(!red.ok);
   assert.match(red.md, /`ui\/a`/);
   assert.match(red.md, /inline image/);
+  assert.doesNotMatch(red.md, /link starting with/);
+  assert.match(report({ matched: ['ui/a'], shown: { kind: null, found: '' }, urls: ['https://p.example/'] }).md, /link starting with one of `https:\/\/p\.example\/`/);
 });

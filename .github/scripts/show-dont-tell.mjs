@@ -54,8 +54,9 @@ const IMAGE = [
   /https:\/\/user-images\.githubusercontent\.com\/[^\s)"'>]+/, // legacy upload
 ];
 
-// What the body shows: {kind: 'image'|'url'|null, found}. Without `urls`, any
-// https URL not on github.com counts; with it, only URLs starting with a prefix.
+// What the body shows: {kind: 'image'|'url'|null, found}. A URL counts only
+// when `urls` names its prefix: "any https link" was satisfied by the agent
+// attribution link (https://claude.com/claude-code) in every agent-written body.
 export function scanBody(body, urls = []) {
   const text = body || '';
   // Code spans and fences only describe a picture; they do not show one.
@@ -64,10 +65,8 @@ export function scanBody(body, urls = []) {
     const m = re.exec(shown);
     if (m) return { kind: 'image', found: m[0] };
   }
-  const all = shown.match(/https:\/\/[^\s)<>"'\]]+/g) || [];
-  const hit = all.find((u) => (urls.length
-    ? urls.some((p) => u.startsWith(p))
-    : !/^https:\/\/(?:[\w-]+\.)*github\.com(?:[/:]|$)/i.test(u)));
+  const all = urls.length ? shown.match(/https:\/\/[^\s)<>"'\]]+/g) || [] : [];
+  const hit = all.find((u) => urls.some((p) => u.startsWith(p)));
   return hit ? { kind: 'url', found: hit } : { kind: null, found: '' };
 }
 
@@ -75,8 +74,8 @@ export function report({ matched, shown, urls }) {
   if (!matched.length) return { ok: true, md: '### show-dont-tell\n\nNo rendered path touched: nothing to show.\n' };
   const list = matched.slice(0, 20).map((f) => `- \`${f}\``).join('\n') + (matched.length > 20 ? `\n- ... and ${matched.length - 20} more` : '');
   if (shown.kind) return { ok: true, md: `### show-dont-tell\n\nRendered paths touched (${matched.length}) and the body shows ${shown.kind === 'image' ? 'an image' : 'a preview URL'}: \`${shown.found}\`\n\n${list}\n` };
-  const what = urls.length ? `a link starting with one of ${urls.map((u) => `\`${u}\``).join(', ')}` : 'a link to a preview outside github.com';
-  return { ok: false, md: `### show-dont-tell: red\n\nThis pull request touches rendered paths:\n\n${list}\n\nIts description carries no picture. Edit the description to add an inline image (\`![what it shows](url)\`, or drag a screenshot in) or ${what}; the check re-runs when the description is edited.\n` };
+  const what = urls.length ? ` or a link starting with one of ${urls.map((u) => `\`${u}\``).join(', ')}` : '';
+  return { ok: false, md: `### show-dont-tell: red\n\nThis pull request touches rendered paths:\n\n${list}\n\nIts description carries no picture. Edit the description to add an inline image (\`![what it shows](url)\`, or drag a screenshot in)${what}; the check re-runs when the description is edited.\n` };
 }
 
 function gh(...args) { return execFileSync('gh', args, { encoding: 'utf8', maxBuffer: 1 << 28 }); }

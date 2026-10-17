@@ -24,13 +24,15 @@ name: show-dont-tell
 #     paths:               # globs of rendered files; ** crosses /, * and ? do not
 #       - "web/**"
 #       - "screenshots/goldens/**"
-#     urls:                # optional prefixes that count as a preview URL
+#     urls:                # optional: prefixes of this repo's preview URLs
 #       - https://preview.example.com/
 #
 # What satisfies the check: an inline image anywhere in the description
 # (`![..](..)`, `<img src=..>`, a github.com/user-attachments upload), or a
-# preview URL -- with `urls:` absent, any https link not on github.com; with
-# it, a link starting with one of the prefixes. Green with "no rendered path
+# link starting with one of the `urls:` prefixes. With `urls:` absent only an
+# image counts: "any https link" was met by the agent attribution link
+# (https://claude.com/claude-code) in every agent-written body, so the check
+# would never have fired on one. Green with "no rendered path
 # touched" when no changed file matches. The description is read live from
 # the API, not the event payload, so an edit is judged on its new text.
 # Renamed files match on both old and new name. Needs only read scopes.
