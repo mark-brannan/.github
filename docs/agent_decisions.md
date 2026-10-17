@@ -83,3 +83,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261017t022338z
 - No Dependabot npm entry for .github/scripts/golden-diff/, so pngjs, pixelmatch and ssim.js stay at the versions the spike measured. Undo: add an npm entry for /.github/scripts/golden-diff to dependabot.yml ([#77](https://github.com/mark-brannan/.github/pull/77))
+
+### 20261017t071430z
+- show-dont-tell: a preview URL satisfies the check only when the repo's opt-in file names its prefix under urls:; without urls: only an image counts, because the agent attribution link https://claude.com/claude-code met the any-https-link default in every agent-written body Undo: restore the any-https-link-off-github.com default in scanBody and its tests (revert 047ba9c) ([#78](https://github.com/mark-brannan/.github/pull/78))
