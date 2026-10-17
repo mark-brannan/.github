@@ -1,0 +1,11 @@
+{
+  "name": "golden-diff-deps",
+  "private": true,
+  "description": "The three pinned libraries golden-diff.mjs scores with; `npm ci` here, then run ../golden-diff.mjs.",
+  "type": "module",
+  "dependencies": {
+    "pixelmatch": "8.0.0",
+    "pngjs": "7.0.0",
+    "ssim.js": "3.5.0"
+  }
+}
