@@ -52,12 +52,12 @@ name: golden-diff
 # This repository has no goldens of its own, so ci.yml runs the engine's
 # test suite (golden-diff.test.mjs, synthetic PNGs) and not this workflow.
 
-# No ref input: the engine is fetched at the ref this workflow file itself
-# was called at, read from `github.job_workflow_ref` (always set; the part
-# after `@`), so engine and workflow cannot drift apart: main for `@main`
-# callers, the branch for a caller trying one. Unparseable, it falls back to
-# main. (`github.job_workflow_sha` was empty on a cross-repo call by branch.)
-# This repository's own PRs run the engine they carry from their checkout.
+# The engine comes from `engine-ref`, main by default, same as prose-budget's
+# `claude-ref`: a caller overrides it to try an engine branch before it lands.
+# The context cannot supply it: `github.job_workflow_sha` and
+# `github.job_workflow_ref` were both measured empty on a cross-repo call by
+# branch (portolani runs 38995230307 and 38995461691). This repository's own
+# PRs run the engine they carry from their checkout.
 on:
   workflow_call:
     inputs:
@@ -81,6 +81,10 @@ on:
         description: "Post the report on the pull request as one sticky comment"
         type: boolean
         default: true
+      engine-ref:
+        description: "Ref of mark-brannan/.github to fetch the engine from; override to try an engine branch from a caller before it lands"
+        type: string
+        default: main
     outputs:
       grade:
         description: "Worst grade over the modified goldens: large, medium, noise; new if only added or removed; none"
@@ -108,20 +112,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - if: github.repository != 'mark-brannan/.github'
-        id: engine
-        env:
-          JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}
-        run: |
-          set -euo pipefail
-          ref="${JOB_WORKFLOW_REF#*@}"
-          [ -n "$ref" ] && [ "$ref" != "$JOB_WORKFLOW_REF" ] || ref=refs/heads/main
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "engine ref: $ref"
-      - if: github.repository != 'mark-brannan/.github'
         uses: actions/checkout@v7
         with:
           repository: mark-brannan/.github
-          ref: ${{ steps.engine.outputs.ref }}
+          ref: ${{ inputs.engine-ref }}
           sparse-checkout: |
             /.github/scripts/golden-diff.mjs
             /.github/scripts/golden-diff/
