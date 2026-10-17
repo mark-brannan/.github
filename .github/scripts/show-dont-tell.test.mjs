@@ -37,6 +37,9 @@ test('scanBody: an image only named in a code span or fence is not shown', () =>
   assert.equal(scanBody('add `![](url)`').kind, null);
   assert.equal(scanBody('```\n![x](y.png)\n```').kind, null);
   assert.equal(scanBody('`code` then ![x](y.png)').kind, 'image');
+  assert.equal(scanBody('urls: `https://preview.example.com/`').kind, null);
+  assert.equal(scanBody('```\nhttps://preview.example.com/\n```').kind, null);
+  assert.equal(scanBody('`code` then https://preview.example.com/').kind, 'url');
 });
 
 test('scanBody: images count anywhere', () => {

@@ -64,7 +64,7 @@ export function scanBody(body, urls = []) {
     const m = re.exec(shown);
     if (m) return { kind: 'image', found: m[0] };
   }
-  const all = text.match(/https:\/\/[^\s)<>"'\]]+/g) || [];
+  const all = shown.match(/https:\/\/[^\s)<>"'\]]+/g) || [];
   const hit = all.find((u) => (urls.length
     ? urls.some((p) => u.startsWith(p))
     : !/^https:\/\/(?:[\w-]+\.)*github\.com(?:[/:]|$)/i.test(u)));
