@@ -52,8 +52,10 @@ name: golden-diff
 # This repository has no goldens of its own, so ci.yml runs the engine's
 # test suite (golden-diff.test.mjs, synthetic PNGs) and not this workflow.
 
-# No ref input: the engine always comes from main, except on this
-# repository's own PRs, which run the engine they carry from their checkout.
+# No ref input: the engine is fetched at `github.job_workflow_sha`, the commit
+# this workflow file itself came from, so engine and workflow cannot drift
+# apart (main for `@main` callers, the branch for a caller trying one). This
+# repository's own PRs run the engine they carry from their checkout.
 on:
   workflow_call:
     inputs:
@@ -107,7 +109,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: mark-brannan/.github
-          ref: main
+          ref: ${{ github.job_workflow_sha }}
           sparse-checkout: |
             /.github/scripts/golden-diff.mjs
             /.github/scripts/golden-diff/
