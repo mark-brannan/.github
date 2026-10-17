@@ -1,0 +1,118 @@
+name: pin-bump-alone
+
+# A dependency whose data the caller's tests walk moves those tests' cost and
+# their counts when its pin moves. Landed alone, a pin bump's diff is the
+# data's consequences and nothing else: regenerated types, re-measured
+# tests, a rewritten findings register. Landed beside a feature or a
+# refactor, a red test cannot be traced to the pin or to the code, and the
+# reviewer cannot tell which changed what. colregs-engine's piece-merge
+# test timing out on a colregs 0.3.4 -> 0.3.5 bump inside a refactor PR is
+# the worked example.
+#
+# Fails when the PR's diff against its base (from the merge base) changes
+# the lockfile's `resolved` for any of `packages` AND touches a path
+# outside `allow`. Two pins moving together still pass: each is a pin bump. A PR that leaves the pin alone always passes.
+#
+# Bypass is the `pin-bump-mixed-ok` label, applied by a human. Labels are
+# read from the API at run time, not from the event payload, so re-running
+# the failed job after labelling sees the label; the caller's ci.yml need
+# not trigger on `labeled`.
+#
+#   pin-bump-alone:
+#     permissions:
+#       contents: read
+#       pull-requests: read
+#     uses: mark-brannan/.github/.github/workflows/pin-bump-alone.yml@main
+#     with:
+#       packages: |
+#         colregs
+#       allow: |
+#         src/generated/**
+#         test/**
+
+on:
+  workflow_call:
+    inputs:
+      packages:
+        description: "Newline-separated npm dependencies whose pins move alone"
+        required: true
+        type: string
+      allow:
+        description: "Newline-separated git glob pathspecs a pin bump may also touch; package.json and package-lock.json always may"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pin-bump-alone:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: A pin bump lands alone
+        env:
+          # Through env, never interpolated into the script.
+          BASE: ${{ github.event.pull_request.base.ref }}
+          PR: ${{ github.event.pull_request.number }}
+          PKGS: ${{ inputs.packages }}
+          ALLOW: ${{ inputs.allow }}
+          GH_TOKEN: ${{ github.token }}
+          LABEL: pin-bump-mixed-ok
+        run: |
+          set -euo pipefail
+          if [ -z "$BASE" ]; then
+            echo "not a pull request: nothing to compare"
+            exit 0
+          fi
+          mb=$(git merge-base "origin/$BASE" HEAD)
+
+          resolved() {
+            git show "$1:package-lock.json" 2>/dev/null \
+              | jq -r --arg k "node_modules/$2" '.packages[$k].resolved // empty' \
+              || true
+          }
+          moved=""
+          while IFS= read -r pkg; do
+            [ -n "$pkg" ] || continue
+            before=$(resolved "$mb" "$pkg")
+            after=$(resolved HEAD "$pkg")
+            [ "$before" = "$after" ] && continue
+            echo "the $pkg pin moves: $before -> $after"
+            moved+="${moved:+, }$pkg"
+          done <<< "$PKGS"
+          if [ -z "$moved" ]; then
+            echo "ok: no listed pin moves here"
+            exit 0
+          fi
+
+          specs=(. ':(exclude)package.json' ':(exclude)package-lock.json')
+          while IFS= read -r p; do
+            [ -n "$p" ] && specs+=(":(exclude,glob)$p")
+          done <<< "$ALLOW"
+          outside=$(git diff --name-only "$mb" HEAD -- "${specs[@]}")
+          if [ -z "$outside" ]; then
+            echo "ok: the $moved pin moves and nothing else does"
+            exit 0
+          fi
+
+          echo "paths outside a pin bump's reach:"
+          printf '%s\n' "$outside" | sed 's/^/  /'
+
+          # Before the ::error::, so a labelled PR carries no error
+          # annotation on a green step.
+          if gh api "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '.[].name' \
+            | grep -qxF "$LABEL"; then
+            echo "::notice::a $moved pin bump mixed with other work -- allowed by the $LABEL label"
+            exit 0
+          fi
+
+          echo "::error::a $moved pin bump mixed with other work"
+          echo "Split it: the pin bump and what its data forces land alone; the rest follows."
+          echo "Bypass is the $LABEL label, a human's to apply."
+          exit 1
