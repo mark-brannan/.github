@@ -98,6 +98,16 @@ jobs:
       - run: npm ci --prefix .github/scripts/golden-diff --no-audit --no-fund
       - run: node --test .github/scripts/golden-diff.test.mjs
 
+  # The show-dont-tell script's suite (glob matcher, body scanner); no
+  # network, node built-ins only; seconds.
+  show-dont-tell-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: node --test .github/scripts/show-dont-tell.test.mjs
+
   # The review-metrics suite; parsing and classing only, no network; seconds.
   review-metrics-tests:
     runs-on: ubuntu-latest
@@ -110,7 +120,7 @@ jobs:
   # The single required status check. `always()` lets it evaluate when a
   # dependency failed or was skipped instead of inheriting the skip.
   ci-gate:
-    needs: [nonempty, secret-scan, complexity-tests, duplication-tests, golden-diff-tests, review-metrics-tests]
+    needs: [nonempty, secret-scan, complexity-tests, duplication-tests, golden-diff-tests, show-dont-tell-tests, review-metrics-tests]
     if: always()
     permissions: {}
     uses: ./.github/workflows/ci-gate.yml
