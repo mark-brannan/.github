@@ -1,0 +1,85 @@
+name: show-dont-tell
+
+# A pull request that touches a rendered path must show it: an image or a
+# preview URL in its description, else this check is red. Why: a change to
+# what people see is judged by looking, and a description that only tells
+# ("tweaked the header spacing") makes the reviewer rebuild the page to find
+# out. Opt-in per repository; a repository without the file below passes
+# with a note.
+#
+# Caller, in the repository's own workflow (the `edited` type is what makes
+# a description edit re-run the check, so keep it):
+#
+#     on:
+#       pull_request:
+#         types: [opened, edited, synchronize, reopened]
+#     jobs:
+#       show-dont-tell:
+#         permissions: { contents: read, pull-requests: read }
+#         uses: mark-brannan/.github/.github/workflows/show-dont-tell.yml@main
+#
+# Opt-in file, `.github/show-dont-tell.yml` in the calling repository:
+#
+#     paths:               # globs of rendered files; ** crosses /, * and ? do not
+#       - "web/**"
+#       - "screenshots/goldens/**"
+#     urls:                # optional prefixes that count as a preview URL
+#       - https://preview.example.com/
+#
+# What satisfies the check: an inline image anywhere in the description
+# (`![..](..)`, `<img src=..>`, a github.com/user-attachments upload), or a
+# preview URL -- with `urls:` absent, any https link not on github.com; with
+# it, a link starting with one of the prefixes. Green with "no rendered path
+# touched" when no changed file matches. The description is read live from
+# the API, not the event payload, so an edit is judged on its new text.
+# Renamed files match on both old and new name. Needs only read scopes.
+#
+# The script is .github/scripts/show-dont-tell.mjs in this repository (node
+# built-ins only, so the job is seconds); it is fetched from `engine-ref`,
+# main by default, as golden-diff.yml does, so a caller can try a branch.
+
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: "Path of the opt-in file in the calling repository"
+        type: string
+        default: ".github/show-dont-tell.yml"
+      engine-ref:
+        description: "Ref of mark-brannan/.github to fetch the script from; override to try a branch from a caller before it lands"
+        type: string
+        default: main
+
+jobs:
+  show-dont-tell:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    env:
+      SCRIPT: ${{ github.repository == 'mark-brannan/.github' && '.github/scripts' || '.show-dont-tell-engine/.github/scripts' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - if: github.repository != 'mark-brannan/.github'
+        uses: actions/checkout@v7
+        with:
+          repository: mark-brannan/.github
+          ref: ${{ inputs.engine-ref }}
+          sparse-checkout: |
+            /.github/scripts/show-dont-tell.mjs
+          sparse-checkout-cone-mode: false
+          path: .show-dont-tell-engine
+          persist-credentials: false
+      - name: The description shows what the rendered paths changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          CONFIG: ${{ inputs.config }}
+        run: |
+          set -euo pipefail
+          rc=0
+          node "$SCRIPT/show-dont-tell.mjs" "$CONFIG" > "$RUNNER_TEMP/sdt.md" || rc=$?
+          cat "$RUNNER_TEMP/sdt.md" >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/sdt.md"
+          exit "$rc"
