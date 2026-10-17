@@ -1,0 +1,208 @@
+name: golden-diff
+
+# Shared by every repository with golden images: how far each golden a pull
+# request re-baselines moved, scored and written to the job summary. Why:
+# searoom#218 found that agents had been regenerating goldens without looking
+# at them, so a redesign and pixel noise landed with the same "update
+# goldens" commit. A score per image -- changed-pixel fraction, SSIM, how many
+# regions moved and how much of the frame they cover -- tells the two apart
+# at a glance, and the headline grade (`large` / `medium` / `noise`) can drive
+# a label a reviewer filters on. A measurement, not a gate: the engine exits
+# 0 whatever the numbers say, so callers leave this job out of ci-gate's
+# needs.
+#
+# The engine is .github/scripts/golden-diff.mjs in this repository (ESM, the
+# runner's own node, three pinned libraries installed with `npm ci` from the
+# committed lockfile in .github/scripts/golden-diff/); this workflow fetches
+# it the same way complexity.yml does and runs it against the merge base.
+# Which directories hold goldens varies per repo, so `paths` is an input: a
+# space-separated list of globs, default any `golden/` or `goldens/` tree.
+# The grade thresholds are inputs too, as strings; the defaults are pencil
+# guesses from one spike (claude_prompts_scratch, 2026-10-17 goldens score
+# spike), kept exact so its measured numbers carry over.
+#
+# Old, new and diff images of each golden, plus a side-by-side strip, go in
+# the `golden-diff` artifact (kept 90 days); every metric per image is in its
+# golden-diff.json. The summary is also posted on the pull request as one
+# comment, replaced on each push. When no golden changed, no comment is
+# posted, but an earlier one is updated to say so. With `label` set, that
+# label is added on grade `large` and removed again when a later push is
+# not. Posting and labelling need `pull-requests: write`. This job declares
+# no permissions of its own and runs with whatever the caller grants: a
+# called job that asks for more than its caller allows fails at startup,
+# before any step runs, so declaring the write scope here would break a
+# caller that grants only `contents: read`. Without the scope (such a
+# caller, or a fork's read-only token) each is skipped with a notice and the
+# job stays green.
+#
+# Outputs: `grade` (large / medium / noise / new / none), `min-ssim` (over
+# the modified goldens, empty if none) and `changed` (modified + added +
+# removed), for a caller that wants to act on them.
+#
+#     jobs:
+#       golden-diff:
+#         permissions:
+#           contents: read
+#           pull-requests: write
+#         uses: mark-brannan/.github/.github/workflows/golden-diff.yml@main
+#         with:
+#           paths: screenshots/goldens/**
+#           label: goldens-large
+#
+# This repository has no goldens of its own, so ci.yml runs the engine's
+# test suite (golden-diff.test.mjs, synthetic PNGs) and not this workflow.
+
+# No ref input: the engine always comes from main, except on this
+# repository's own PRs, which run the engine they carry from their checkout.
+on:
+  workflow_call:
+    inputs:
+      paths:
+        description: "Space-separated globs of the goldens to score, relative to the repo root"
+        type: string
+        default: "**/golden/** **/goldens/**"
+      large-ssim:
+        description: "Below this SSIM (or on any size change) a golden's move is `large`"
+        type: string
+        default: "0.80"
+      medium-ssim:
+        description: "Below this SSIM a golden's move is `medium`; at or above it, `noise`"
+        type: string
+        default: "0.95"
+      label:
+        description: "A label to add to the PR on grade `large` and remove otherwise; empty for none"
+        type: string
+        default: ""
+      comment:
+        description: "Post the report on the pull request as one sticky comment"
+        type: boolean
+        default: true
+    outputs:
+      grade:
+        description: "Worst grade over the modified goldens: large, medium, noise; new if only added or removed; none"
+        value: ${{ jobs.golden-diff.outputs.grade }}
+      min-ssim:
+        description: "The lowest SSIM over the modified goldens; empty when none was modified"
+        value: ${{ jobs.golden-diff.outputs.min-ssim }}
+      changed:
+        description: "Goldens modified, added or removed by the pull request"
+        value: ${{ jobs.golden-diff.outputs.changed }}
+
+jobs:
+  golden-diff:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    outputs:
+      grade: ${{ steps.score.outputs.grade }}
+      min-ssim: ${{ steps.score.outputs.min-ssim }}
+      changed: ${{ steps.score.outputs.changed }}
+    env:
+      ENGINE: ${{ github.repository == 'mark-brannan/.github' && '.github/scripts' || '.golden-diff-engine/.github/scripts' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - if: github.repository != 'mark-brannan/.github'
+        uses: actions/checkout@v7
+        with:
+          repository: mark-brannan/.github
+          ref: main
+          sparse-checkout: |
+            /.github/scripts/golden-diff.mjs
+            /.github/scripts/golden-diff/
+          sparse-checkout-cone-mode: false
+          path: .golden-diff-engine
+          persist-credentials: false
+      - name: Install the engine's libraries from its lockfile
+        run: |
+          set -euo pipefail
+          echo "engine: $ENGINE/golden-diff.mjs · node $(node --version) · npm $(npm --version)"
+          npm ci --prefix "$ENGINE/golden-diff" --no-audit --no-fund
+      - name: golden-diff
+        id: score
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          PATHS: ${{ inputs.paths }}
+          LARGE_SSIM: ${{ inputs.large-ssim }}
+          MEDIUM_SSIM: ${{ inputs.medium-ssim }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/golden-diff.md"
+          json="$RUNNER_TEMP/golden-diff.json"
+          node "$ENGINE/golden-diff.mjs" --base "$BASE" --paths "$PATHS" \
+            --large-ssim "$LARGE_SSIM" --medium-ssim "$MEDIUM_SSIM" \
+            --out "$RUNNER_TEMP/golden-diff" --json "$json" > "$report"
+          changed=$(jq -r '.headline.changed' "$json")
+          if [ "$changed" != 0 ]; then
+            echo "Old | new | diff (and a side-by-side strip) of each golden: the \`golden-diff\` artifact of this [run]($RUN_URL)." >> "$report"
+          fi
+          tee -a "$GITHUB_STEP_SUMMARY" < "$report"
+          cp "$json" "$RUNNER_TEMP/golden-diff/golden-diff.json"
+          {
+            echo "grade=$(jq -r '.headline.grade' "$json")"
+            echo "min-ssim=$(jq -r '.headline.minSsim // empty' "$json")"
+            echo "changed=$changed"
+          } >> "$GITHUB_OUTPUT"
+      - name: Post the report on the pull request
+        if: inputs.comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          CHANGED: ${{ steps.score.outputs.changed }}
+        run: |
+          set -euo pipefail
+          mark='<!-- golden-diff-report -->'
+          body="$RUNNER_TEMP/comment.md"
+          { echo "$mark"; cat "$RUNNER_TEMP/golden-diff.md"; } > "$body"
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq "[.[] | select(.body | startswith(\"$mark\")) | .id] | first // empty" 2>/dev/null | head -n1 || true)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$body" > /dev/null \
+              || echo "::notice::golden-diff: could not update comment $id; the report is in the job summary."
+          elif [ "$CHANGED" != 0 ]; then
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@"$body" > /dev/null \
+              || echo "::notice::golden-diff: could not comment (needs pull-requests: write); the report is in the job summary."
+          else
+            echo "no golden changed and no earlier report to update: no comment"
+          fi
+      - name: Label the pull request by grade
+        if: inputs.label != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          LABEL: ${{ inputs.label }}
+          GRADE: ${{ steps.score.outputs.grade }}
+        run: |
+          set -euo pipefail
+          enc=$(jq -rn --arg l "$LABEL" '$l | @uri')
+          if [ "$GRADE" = large ]; then
+            if ! gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=$LABEL" > /dev/null 2>&1; then
+              # The label may not exist yet in this repository: make it, then add it.
+              gh api -X POST "repos/$REPO/labels" -f "name=$LABEL" -f color=d93f0b \
+                -f "description=golden-diff: a golden moved a lot (SSIM below the large threshold, or a size change)" > /dev/null 2>&1 || true
+              gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=$LABEL" > /dev/null \
+                || echo "::notice::golden-diff: could not add label '$LABEL' (needs pull-requests: write)."
+            fi
+            echo "grade large: label '$LABEL' on #$PR"
+          else
+            if out=$(gh api -X DELETE "repos/$REPO/issues/$PR/labels/$enc" 2>&1); then
+              echo "grade $GRADE: label '$LABEL' removed from #$PR"
+            else
+              case "$out" in
+                *"Label does not exist"*|*"HTTP 404"*) echo "grade $GRADE: label '$LABEL' not on #$PR" ;;
+                *) echo "::notice::golden-diff: could not remove label '$LABEL' (needs pull-requests: write)." ;;
+              esac
+            fi
+          fi
+      - name: Upload old, new and diff images and every metric
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: golden-diff
+          path: ${{ runner.temp }}/golden-diff
+          if-no-files-found: ignore
+          retention-days: 90

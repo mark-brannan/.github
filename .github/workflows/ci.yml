@@ -86,6 +86,18 @@ jobs:
       pull-requests: write
     uses: ./.github/workflows/duplication.yml
 
+  # The golden-diff engine's suite: synthetic PNGs in a temp repo, its three
+  # libraries from the committed lockfile; seconds. The workflow itself is
+  # not run here: this repo has no goldens for it to score.
+  golden-diff-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: npm ci --prefix .github/scripts/golden-diff --no-audit --no-fund
+      - run: node --test .github/scripts/golden-diff.test.mjs
+
   # The review-metrics suite; parsing and classing only, no network; seconds.
   review-metrics-tests:
     runs-on: ubuntu-latest
@@ -98,7 +110,7 @@ jobs:
   # The single required status check. `always()` lets it evaluate when a
   # dependency failed or was skipped instead of inheriting the skip.
   ci-gate:
-    needs: [nonempty, secret-scan, complexity-tests, duplication-tests, review-metrics-tests]
+    needs: [nonempty, secret-scan, complexity-tests, duplication-tests, golden-diff-tests, review-metrics-tests]
     if: always()
     permissions: {}
     uses: ./.github/workflows/ci-gate.yml
