@@ -28,6 +28,17 @@ test('parseConfig reads paths and urls, tolerates comments and quotes', () => {
   assert.deepEqual(parseConfig(''), { paths: [], urls: [] });
 });
 
+test('parseConfig accepts unindented list items', () => {
+  assert.deepEqual(parseConfig('paths:\n- web/**\n'), { paths: ['web/**'], urls: [] });
+});
+
+test('scanBody: an image only named in a code span or fence is not shown', () => {
+  assert.equal(scanBody('Satisfied by an inline image (`![](..)`)').kind, null);
+  assert.equal(scanBody('add `![](url)`').kind, null);
+  assert.equal(scanBody('```\n![x](y.png)\n```').kind, null);
+  assert.equal(scanBody('`code` then ![x](y.png)').kind, 'image');
+});
+
 test('scanBody: images count anywhere', () => {
   assert.equal(scanBody('hi ![shot](https://x.test/a.png)').kind, 'image');
   assert.equal(scanBody('<img width="3" src="a.png">').kind, 'image');

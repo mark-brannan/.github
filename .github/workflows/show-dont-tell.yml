@@ -18,7 +18,8 @@ name: show-dont-tell
 #         permissions: { contents: read, pull-requests: read }
 #         uses: mark-brannan/.github/.github/workflows/show-dont-tell.yml@main
 #
-# Opt-in file, `.github/show-dont-tell.yml` in the calling repository:
+# Opt-in file, `.github/show-dont-tell.yml` in the calling repository, read
+# at the PR's base commit (a PR cannot exempt itself by editing it):
 #
 #     paths:               # globs of rendered files; ** crosses /, * and ? do not
 #       - "web/**"
@@ -33,6 +34,7 @@ name: show-dont-tell
 # touched" when no changed file matches. The description is read live from
 # the API, not the event payload, so an edit is judged on its new text.
 # Renamed files match on both old and new name. Needs only read scopes.
+# (The caller checks nothing out; the job reads the file through the API.)
 #
 # The script is .github/scripts/show-dont-tell.mjs in this repository (node
 # built-ins only, so the job is seconds); it is fetched from `engine-ref`,
@@ -57,7 +59,8 @@ jobs:
     env:
       SCRIPT: ${{ github.repository == 'mark-brannan/.github' && '.github/scripts' || '.show-dont-tell-engine/.github/scripts' }}
     steps:
-      - uses: actions/checkout@v7
+      - if: github.repository == 'mark-brannan/.github'
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
       - if: github.repository != 'mark-brannan/.github'
@@ -75,6 +78,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           CONFIG: ${{ inputs.config }}
         run: |
           set -euo pipefail

@@ -40,7 +40,7 @@ export function parseConfig(text) {
     if (!line.trim()) continue;
     const head = /^(paths|urls):\s*$/.exec(line);
     if (head) { key = head[1]; continue; }
-    const item = /^\s+-\s+(.*)$/.exec(line);
+    const item = /^\s*-\s+(.*)$/.exec(line);
     if (item && key) out[key].push(item[1].trim().replace(/^(["'])(.*)\1$/, '$2'));
     else key = null;
   }
@@ -58,8 +58,10 @@ const IMAGE = [
 // https URL not on github.com counts; with it, only URLs starting with a prefix.
 export function scanBody(body, urls = []) {
   const text = body || '';
+  // Code spans and fences only describe a picture; they do not show one.
+  const shown = text.replace(/```[\s\S]*?```|`[^`\n]*`/g, '');
   for (const re of IMAGE) {
-    const m = re.exec(text);
+    const m = re.exec(shown);
     if (m) return { kind: 'image', found: m[0] };
   }
   const all = text.match(/https:\/\/[^\s)<>"'\]]+/g) || [];
@@ -81,12 +83,22 @@ function gh(...args) { return execFileSync('gh', args, { encoding: 'utf8', maxBu
 
 function main() {
   const [cfgPath] = process.argv.slice(2);
-  const { REPO, PR } = process.env;
-  if (!existsSync(cfgPath)) {
-    console.log(`### show-dont-tell\n\nNo \`${cfgPath}\` in this repository: not opted in, nothing checked.`);
+  const { REPO, PR, BASE_SHA } = process.env;
+  // The opt-in file is read at the PR's base, so a PR cannot exempt itself by
+  // deleting or emptying it; a change to it takes effect once it merges.
+  let text = null;
+  if (BASE_SHA) {
+    try {
+      text = gh('api', `repos/${REPO}/contents/${cfgPath}?ref=${BASE_SHA}`, '-H', 'Accept: application/vnd.github.raw');
+    } catch (e) {
+      if (!/HTTP 404/.test(String(e.stderr || e.message))) throw e;
+    }
+  } else if (existsSync(cfgPath)) text = readFileSync(cfgPath, 'utf8');
+  if (text === null) {
+    console.log(`### show-dont-tell\n\nNo \`${cfgPath}\` in this repository${BASE_SHA ? ' at the base commit' : ''}: not opted in, nothing checked.`);
     return 0;
   }
-  const cfg = parseConfig(readFileSync(cfgPath, 'utf8'));
+  const cfg = parseConfig(text);
   if (!cfg.paths.length) {
     console.log(`### show-dont-tell\n\n\`${cfgPath}\` lists no \`paths:\`: nothing checked.`);
     return 0;
