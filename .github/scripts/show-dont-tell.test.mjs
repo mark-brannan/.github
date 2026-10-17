@@ -1,7 +1,7 @@
 // Tests for show-dont-tell.mjs. Run: node --test .github/scripts/show-dont-tell.test.mjs
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { globToRegExp, matchPaths, parseConfig, report, scanBody } from './show-dont-tell.mjs';
+import { globToRegExp, matchPaths, parseConfig, report, scanBody, scanTryIt, tryItBlock } from './show-dont-tell.mjs';
 
 test('globs: ** crosses directories, * and ? do not', () => {
   const m = (g, p) => globToRegExp(g).test(p);
@@ -80,4 +80,63 @@ test('report: green with no match, green when shown, red when not', () => {
   assert.match(red.md, /inline image/);
   assert.doesNotMatch(red.md, /link starting with/);
   assert.match(report({ matched: ['ui/a'], shown: { kind: null, found: '' }, urls: ['https://p.example/'] }).md, /link starting with one of `https:\/\/p\.example\/`/);
+});
+
+test('parseConfig reads checkout, install, serve; lists still work', () => {
+  const c = parseConfig('paths:\n  - ui/**\ncheckout: ~/searoom   # my clone\ninstall: "npm ci"\nserve: npm run dev -- --strictPort --port {port}\n');
+  assert.deepEqual(c, { paths: ['ui/**'], urls: [], checkout: '~/searoom', install: 'npm ci', serve: 'npm run dev -- --strictPort --port {port}' });
+  assert.equal(parseConfig('paths:\n  - a\n').serve, undefined);
+  assert.equal(parseConfig('install:\npaths:\n  - a\n').install, '');
+});
+
+const ARGS = { repo: 'mark-brannan/searoom', pr: 221, head: '5c8568cdeadbeef', checkout: '~/searoom', install: 'npm ci', serve: 'npm run dev -- --strictPort --port {port}' };
+
+test('tryItBlock renders the spec block exactly', () => {
+  const want = [
+    '## Try it',
+    '',
+    '    git -C ~/searoom fetch origin +pull/221/head:refs/pr/221 \\',
+    '      && { [ -d ~/searoom/.claude/worktrees/pr-221 ] || git -C ~/searoom worktree add --detach ~/searoom/.claude/worktrees/pr-221 refs/pr/221; } \\',
+    '      && git -C ~/searoom/.claude/worktrees/pr-221 checkout -q --detach refs/pr/221 \\',
+    '      && cd ~/searoom/.claude/worktrees/pr-221 \\',
+    '      && npm ci && npm run dev -- --strictPort --port 10221',
+    '',
+    'Serves PR #221 (head 5c8568c when this was written) on http://localhost:10221 from',
+    'its own worktree. Paste again after a push to the PR: it fetches and moves the',
+    'worktree. Remove: `git -C ~/searoom worktree remove --force ~/searoom/.claude/worktrees/pr-221`',
+    '',
+  ].join('\n');
+  assert.equal(tryItBlock(ARGS), want);
+});
+
+test('tryItBlock omits install when empty and replaces every {port}', () => {
+  const b = tryItBlock({ ...ARGS, install: '', serve: 'npx serve -l {port} --x {port}' });
+  assert.match(b, /\n      && npx serve -l 10221 --x 10221\n/);
+  assert.doesNotMatch(b, /npm ci/);
+});
+
+test('scanTryIt: heading plus pull/N/head after it, fences not stripped', () => {
+  assert.ok(scanTryIt(tryItBlock(ARGS), 221));
+  assert.ok(!scanTryIt(tryItBlock(ARGS), 22));
+  assert.ok(!scanTryIt('no heading, pull/221/head', 221));
+  assert.ok(!scanTryIt('pull/221/head\n\n## Try it\nnothing after', 221));
+  assert.ok(scanTryIt('### try it'.replace('t', 'T') + '\n```\ngit fetch +pull/7/head\n```', 7));
+  assert.ok(!scanTryIt('', 1));
+});
+
+test('report: with serve, red without a Try it block even when shown; green with it', () => {
+  const block = tryItBlock(ARGS);
+  const img = { kind: 'image', found: 'x' };
+  const red = report({ matched: ['ui/a'], shown: img, urls: [], serve: ARGS.serve, tryIt: false, block });
+  assert.ok(!red.ok);
+  assert.match(red.md, /show-dont-tell: red/);
+  assert.match(red.md, /## Try it/);
+  assert.match(red.md, /pull\/221\/head/);
+  const redNone = report({ matched: ['ui/a'], shown: { kind: null, found: '' }, urls: [], serve: ARGS.serve, tryIt: false, block });
+  assert.ok(!redNone.ok);
+  assert.match(redNone.md, /no picture/);
+  assert.match(redNone.md, /## Try it/);
+  assert.ok(report({ matched: ['ui/a'], shown: img, urls: [], serve: ARGS.serve, tryIt: true, block }).ok);
+  assert.ok(report({ matched: [], shown: { kind: null }, urls: [], serve: ARGS.serve, tryIt: false, block }).ok);
+  assert.ok(report({ matched: ['ui/a'], shown: img, urls: [] }).ok);
 });

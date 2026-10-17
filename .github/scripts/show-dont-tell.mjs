@@ -4,7 +4,9 @@
 //   node show-dont-tell.mjs <config-file>   (env: GH_TOKEN, REPO, PR)
 //
 // Exits 1 (red) when a changed file matches `paths:` and the PR body carries
-// neither an image nor a preview URL; 0 otherwise. Writes markdown to stdout.
+// neither an image nor a preview URL, or when the opt-in file sets `serve:`
+// and the body has no "Try it" block naming this PR's head; 0 otherwise.
+// Writes markdown to stdout.
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -31,13 +33,20 @@ export function matchPaths(files, globs) {
 }
 
 // The opt-in file: top-level `paths:` and optional `urls:`, each a "- item"
-// list. Comments (#) and quotes are tolerated; nothing else is YAML.
+// list, and optional scalars `checkout:`, `install:`, `serve:` (set only when
+// present). Comments (#) and quotes are tolerated; nothing else is YAML.
 export function parseConfig(text) {
   const out = { paths: [], urls: [] };
   let key = null;
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.replace(/(^|\s)#.*$/, '').trimEnd();
     if (!line.trim()) continue;
+    const scalar = /^(checkout|install|serve):\s*(.*)$/.exec(line);
+    if (scalar) {
+      out[scalar[1]] = scalar[2].trim().replace(/^(["'])(.*)\1$/, '$2');
+      key = null;
+      continue;
+    }
     const head = /^(paths|urls):\s*$/.exec(line);
     if (head) { key = head[1]; continue; }
     const item = /^\s*-\s+(.*)$/.exec(line);
@@ -71,12 +80,47 @@ export function scanBody(body, urls = []) {
   return hit ? { kind: 'url', found: hit } : { kind: null, found: '' };
 }
 
-export function report({ matched, shown, urls }) {
+// The "Try it" block every PR of a repo with `serve:` carries: one paste that
+// fetches the PR head onto refs/pr/N (never a branch, so a second paste cannot
+// hit "refusing to fetch into checked-out branch"), adds or moves a detached
+// worktree, installs and serves on port 10000 + PR number.
+export function tryItBlock({ repo, pr, head, checkout, install, serve }) {
+  const port = 10000 + Number(pr);
+  const wt = `${checkout}/.claude/worktrees/pr-${pr}`;
+  const cmd = serve.replaceAll('{port}', String(port));
+  const run = [install, cmd].filter(Boolean).join(' && ');
+  return [
+    '## Try it',
+    '',
+    `    git -C ${checkout} fetch origin +pull/${pr}/head:refs/pr/${pr} \\`,
+    `      && { [ -d ${wt} ] || git -C ${checkout} worktree add --detach ${wt} refs/pr/${pr}; } \\`,
+    `      && git -C ${wt} checkout -q --detach refs/pr/${pr} \\`,
+    `      && cd ${wt} \\`,
+    `      && ${run}`,
+    '',
+    `Serves PR #${pr} (head ${String(head).slice(0, 7)} when this was written) on http://localhost:${port} from`,
+    'its own worktree. Paste again after a push to the PR: it fetches and moves the',
+    `worktree. Remove: \`git -C ${checkout} worktree remove --force ${wt}\``,
+    '',
+  ].join('\n');
+}
+
+// Does the body carry a "Try it" heading followed by text naming this PR's
+// head ref? Fences are not stripped: the command is the deliverable.
+export function scanTryIt(body, pr) {
+  const m = /^#{1,6}\s*Try it\b/m.exec(body || '');
+  return !!m && (body || '').slice(m.index + m[0].length).includes(`pull/${pr}/head`);
+}
+
+export function report({ matched, shown, urls, serve = '', tryIt = true, block = '' }) {
   if (!matched.length) return { ok: true, md: '### show-dont-tell\n\nNo rendered path touched: nothing to show.\n' };
   const list = matched.slice(0, 20).map((f) => `- \`${f}\``).join('\n') + (matched.length > 20 ? `\n- ... and ${matched.length - 20} more` : '');
+  const tryItRed = serve && !tryIt;
+  const tryItMsg = tryItRed ? `This repository declares a \`serve:\` command, so the description must also carry a "Try it" block: a \`## Try it\` heading followed by a command containing \`pull/N/head\` for this pull request, so the reviewer can run the page in one paste. Add this to the description (the check re-runs when it is edited):\n\n\`\`\`\`markdown\n${block}\`\`\`\`\n` : '';
+  if (shown.kind && tryItRed) return { ok: false, md: `### show-dont-tell: red\n\nThis pull request touches rendered paths:\n\n${list}\n\nThe body shows ${shown.kind === 'image' ? 'an image' : 'a preview URL'}, but has no "Try it" block.\n\n${tryItMsg}` };
   if (shown.kind) return { ok: true, md: `### show-dont-tell\n\nRendered paths touched (${matched.length}) and the body shows ${shown.kind === 'image' ? 'an image' : 'a preview URL'}: \`${shown.found}\`\n\n${list}\n` };
   const what = urls.length ? ` or a link starting with one of ${urls.map((u) => `\`${u}\``).join(', ')}` : '';
-  return { ok: false, md: `### show-dont-tell: red\n\nThis pull request touches rendered paths:\n\n${list}\n\nIts description carries no picture. Edit the description to add an inline image (\`![what it shows](url)\`, or drag a screenshot in)${what}; the check re-runs when the description is edited.\n` };
+  return { ok: false, md: `### show-dont-tell: red\n\nThis pull request touches rendered paths:\n\n${list}\n\nIts description carries no picture. Edit the description to add an inline image (\`![what it shows](url)\`, or drag a screenshot in)${what}; the check re-runs when the description is edited.\n${tryItRed ? `\n${tryItMsg}` : ''}` };
 }
 
 function gh(...args) { return execFileSync('gh', args, { encoding: 'utf8', maxBuffer: 1 << 28 }); }
@@ -106,9 +150,16 @@ function main() {
   const files = gh('api', `repos/${REPO}/pulls/${PR}/files`, '--paginate', '--jq', '.[] | .filename, (.previous_filename // empty)').split('\n').filter(Boolean);
   const matched = matchPaths(files, cfg.paths);
   const body = matched.length ? gh('api', `repos/${REPO}/pulls/${PR}`, '--jq', '.body // ""') : '';
-  const r = report({ matched, shown: scanBody(body, cfg.urls), urls: cfg.urls });
+  const serve = cfg.serve || '';
+  const tryIt = !serve || !matched.length || scanTryIt(body, PR);
+  let block = '';
+  if (serve && matched.length && !tryIt) {
+    const head = gh('api', `repos/${REPO}/pulls/${PR}`, '--jq', '.head.sha').trim();
+    block = tryItBlock({ repo: REPO, pr: PR, head, checkout: cfg.checkout || '~/' + String(REPO).split('/').pop(), install: cfg.install || '', serve });
+  }
+  const r = report({ matched, shown: scanBody(body, cfg.urls), urls: cfg.urls, serve, tryIt, block });
   console.log(r.md);
-  if (!r.ok) console.error('::error::show-dont-tell: rendered paths touched, but the PR description has no image or preview URL.');
+  if (!r.ok) console.error(`::error::show-dont-tell: rendered paths touched, but the PR description has no ${serve && !tryIt ? '"Try it" block (or no ' : ''}image or preview URL${serve && !tryIt ? ')' : ''}.`);
   return r.ok ? 0 : 1;
 }
 
