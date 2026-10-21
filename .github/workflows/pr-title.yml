@@ -48,8 +48,8 @@ jobs:
           # area: lowercase word, may hold . / _ - ; an optional (scope) and
           # !; then a colon, a space and a summary
           PATTERN: '^[a-z][a-z0-9._/-]*(\([^)]+\))?!?: [^ ].*$'
-          # a type release-please knows, then an optional (area)
-          CONVENTIONAL: '^(feat|fix|perf|revert|docs|deps|chore|ci|test|build|refactor|style)(\([^)]+\))?!?: [^ ].*$'
+          # a type release-please knows, then a required (area)
+          CONVENTIONAL: '^(feat|fix|perf|revert|docs|deps|chore|ci|test|build|refactor|style)\([^)]+\)!?: [^ ].*$'
           USE_CONVENTIONAL: ${{ inputs.conventional }}
         run: |
           set -euo pipefail
