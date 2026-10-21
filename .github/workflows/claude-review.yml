@@ -60,7 +60,11 @@ name: Claude PR Review
 #            guard names: CLAUDE.md, .claude/rules, ADRs, decisions -- a bot's
 #            comment there is evidence, never a ruling, so it is mostly noise);
 #            a docs-only diff under `docs-skip-lines`; any diff under
-#            `skip-under-lines` that touches no risky path.
+#            `skip-under-lines` that touches no risky path; a follow-up --
+#            the bot has reviewed this pull request before -- whose push
+#            changed no risky path's own lines (`followup-risky-only`; the
+#            `review:deep` label overrides it, an unknown count or no earlier
+#            head to compare never skips).
 #   default  the caller's `model`, no effort flag: what every PR got before.
 #   deep     a `review:deep` label; a risky path (anything under .github/,
 #            actions, Mergify, CODEOWNERS, hooks, settings, Dockerfiles); a diff over
@@ -174,6 +178,11 @@ on:
         required: false
         type: number
         default: 4
+      followup-risky-only:
+        description: Once the bot has reviewed a pull request (counted as for max-reviews), a later push is reviewed only if its own changed lines touch a risky path; the review:deep label still runs; false reviews every follow-up
+        required: false
+        type: boolean
+        default: true
       allowed-bots:
         description: Bot logins whose pull requests are reviewed anyway (the action refuses non-human actors by default). Overriding replaces this default, so include mergify[bot] and mark-brannan-release-please[bot] in the override too.
         required: false
@@ -244,6 +253,7 @@ jobs:
         id: fp
         env:
           BASE: ${{ github.event.pull_request.base.ref }}
+          BEFORE: ${{ github.event.before }}
           GH_TOKEN: ${{ github.token }}
         run: |
           # Checkout runs with persist-credentials: false, so this fetch is
@@ -253,6 +263,13 @@ jobs:
           auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
           echo "::add-mask::$auth"
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" fetch -q origin "$BASE"
+          # The head this push replaced, for triage's follow-up rule; a force
+          # push leaves it on no branch, so checkout did not bring it. Absent
+          # (opened, ready_for_review) or unfetchable, triage treats the
+          # push's own lines as unknown and does not skip on them.
+          if [ -n "$BEFORE" ] && ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" fetch -q origin "$BEFORE" || true
+          fi
           # The changed lines and file headers only: no `index` line (blob
           # ids) and no `@@` line (positions), so neither shifts when main
           # moves under an unchanged change.
@@ -293,6 +310,8 @@ jobs:
           DEEP_OVER: ${{ inputs.deep-over-lines }}
           PRIOR: ${{ steps.seen.outputs.cache-matched-key }}
           MAX_REVIEWS: ${{ inputs.max-reviews }}
+          FOLLOWUP_RISKY_ONLY: ${{ inputs.followup-risky-only }}
+          BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
           # Labels are read live, not from the event: no create call (REST or
@@ -307,6 +326,15 @@ jobs:
           reviews=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
                       --jq '.[] | select(.user.login == "claude[bot]") | .id' | wc -l) || reviews=unknown
           mb=$(git merge-base "origin/$BASE" HEAD)
+          # The risky class, one list for the tier and the follow-up rule.
+          risky_path() {
+            case "$1" in
+              .github/*|action.yml|*/action.yml|.mergify.yml|CODEOWNERS|\
+              .claude/hooks/*|.claude/settings.json|.claude/settings.*.json|\
+              Dockerfile|*/Dockerfile|Dockerfile.*|*/Dockerfile.*) return 0 ;;
+            esac
+            return 1
+          }
           files=0 lock=0 design=0 docs=0 risky=0 code=0 lines=0
           while IFS=$'\t' read -r add del f; do
             [ -n "$f" ] || continue
@@ -321,19 +349,39 @@ jobs:
               docs/decisions.md|docs/references.md|docs/adr/*|*.adr.md|docs/curia/*|\
               .claude/skills/curia/*|.claude/skills/agora/*)
                 design=$((design + 1)) ;;
-              .github/*|action.yml|*/action.yml|.mergify.yml|CODEOWNERS|\
-              .claude/hooks/*|.claude/settings.json|.claude/settings.*.json|\
-              Dockerfile|*/Dockerfile|Dockerfile.*|*/Dockerfile.*)
-                risky=$((risky + 1)) ;;
-              *.md|*.markdown|*.rst|LICENSE|LICENSE.*)
-                docs=$((docs + 1)) ;;
               *)
-                code=$((code + 1)) ;;
+                if risky_path "$f"; then risky=$((risky + 1))
+                else
+                  case "$f" in
+                    *.md|*.markdown|*.rst|LICENSE|LICENSE.*) docs=$((docs + 1)) ;;
+                    *) code=$((code + 1)) ;;
+                  esac
+                fi ;;
             esac
           # --no-renames: a rename prints as `a/{old => new}/f`, which no
           # pattern matches, so a file moved into .github/ would dodge the
           # risky arm. quotepath=off keeps non-ASCII paths literal.
           done < <(git -c core.quotepath=off diff --no-renames --numstat "$mb" HEAD)
+
+          # This push's own risky lines: each risky path in the PR's diff
+          # before or after the push, its changed lines against its own
+          # merge base compared the way the fingerprint compares the whole
+          # diff, so a rebase or an update from main moves nothing.
+          # `unknown` when there is no earlier head to compare.
+          own() {
+            git -c core.quotepath=off diff --no-color --no-renames --binary -U0 "$1" "$2" -- "$3" \
+              | grep -vE '^(index |@@)' || true
+          }
+          pushed_risky=unknown
+          if [ -n "${BEFORE:-}" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
+             && mbb=$(git merge-base "origin/$BASE" "$BEFORE"); then
+            pushed_risky=0
+            while IFS= read -r f; do
+              risky_path "$f" || continue
+              [ "$(own "$mbb" "$BEFORE" "$f")" = "$(own "$mb" HEAD "$f")" ] || pushed_risky=$((pushed_risky + 1))
+            done < <({ git -c core.quotepath=off diff --no-renames --name-only "$mbb" "$BEFORE"
+                       git -c core.quotepath=off diff --no-renames --name-only "$mb" HEAD; } | sort -u)
+          fi
 
           decision=default reason="no rule matched"
           case " $LABELS " in
@@ -360,6 +408,11 @@ jobs:
               decision=default reason="$reason; this PR already had a review (or its count failed), so a follow-up runs at default"
             fi
           fi
+          case " $LABELS " in *" review:deep "*) deep_label=true ;; *) deep_label=false ;; esac
+          if [ "$decision" != skip ] && [ "$FOLLOWUP_RISKY_ONLY" = true ] && [ "$deep_label" = false ] \
+             && [ "$reviews" != unknown ] && [ "$reviews" -gt 0 ] && [ "$pushed_risky" = 0 ]; then
+            decision=skip reason="follow-up: this push touches no risky path ($reviews reviews already on this PR)"
+          fi
           if [ "$decision" != skip ] && [ "$reviews" != unknown ] && [ "$MAX_REVIEWS" -gt 0 ] && [ "$reviews" -ge "$MAX_REVIEWS" ]; then
             decision=skip reason="cap: $reviews reviews already on this PR (at most $MAX_REVIEWS)"
           fi
@@ -377,6 +430,7 @@ jobs:
             echo "lines=$lines"
             echo "files=$files"
             echo "reviews=$reviews"
+            echo "pushed-risky=$pushed_risky"
             echo "classes=lock=$lock design=$design docs=$docs risky=$risky code=$code"
           } >> "$GITHUB_OUTPUT"
           echo "::notice::review triage: $decision ($reason)"
