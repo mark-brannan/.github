@@ -36,8 +36,8 @@ name: Claude PR Review
 #
 # A run costs real tokens, so it only happens when the pull request's
 # content has changed. `synchronize` also fires on every rebase -- and
-# Mergify keeps open pull requests up to date with main, so that is no
-# longer rare. The gate below hashes the pull request's own changed lines
+# the merge queue brings each pull request up to date with main before it
+# merges, so that is not rare. The gate below hashes the pull request's own changed lines
 # between the merge base and HEAD -- not blob ids, which move whenever a PR
 # merged ahead of this one touched the same file, and not `git patch-id`,
 # which ignores whitespace inside changed lines -- and remembers each

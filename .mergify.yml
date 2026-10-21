@@ -4,16 +4,20 @@
 #     extends: .github
 #
 # and overrides a rule by restating it under the same name. Mergify does three
-# things here, and none of them needs a comment or a click.
+# things here; only a human merge (1 and 3) needs a click: the `merge` label or
+# a `@mergifyio queue` comment.
 #
-# 1. It keeps handed-over pull requests up to date with main. The branch
-#    ruleset requires branches to be up to date before merging, so without
-#    this every merge to main leaves the rest of them stale. Only once they
-#    are handed over, though: a branch an agent session is still working is
-#    that session's to rebase, and a second writer on it clobbers work.
+# 1. It brings a pull request up to date with main only when it is about to
+#    merge, through the queue. The branch ruleset requires branches to be up
+#    to date before merging, but updating every waiting pull request on each
+#    merge to main re-runs CI on all of them, and all but the last of those
+#    runs are thrown away: N waiting pull requests cost N(N-1)/2 runs. The
+#    queue updates one, checks it once, merges it, then takes the next.
 # 2. It merges dependabot's updates once the gate is green. Dependabot is the
 #    volume, and the part nobody is really reviewing.
-# 3. It offers the merge queue for anything else, on request: `@mergifyio queue`.
+# 3. It merges a human pull request through the queue when the `merge` label
+#    goes on, or on a `@mergifyio queue` comment, so it lands on current main.
+#    The label is the one click that replaces the Merge button.
 #
 # Human pull requests are deliberately NOT auto-merged. The ruleset requires no
 # approvals, so an automatic trigger would land work in progress the moment CI
@@ -50,37 +54,20 @@ queue_rules:
       - check-success=ci-gate / gate
 
 pull_request_rules:
-  - name: Update pull requests that have fallen behind main, once handed over
+  - name: Queue a pull request when the merge label goes on
+    # The one-click way in. Only someone with triage access can label, so the
+    # label is the human's say-so; the queue still waits on the gate. blocked
+    # still wins, and a red check outside the gate (secret-scan) still holds.
     conditions:
       - base=main
       - -draft
       - -conflict
-      - -closed
-      - '#commits-behind>0'
-      # Only once the pull request is waiting on a human. While an agent
-      # session holds a branch, that session is the only writer: it rebases
-      # before it pushes and again before it hands over. Mergify writing a
-      # merge commit into the same branch made two writers, and the session's
-      # local checkout was stale from that moment -- which is how a push
-      # clobbered work, and how merge commits piled up on a live branch. The
-      # label goes on when the gate is green and every thread is resolved, so
-      # it is exactly the window where nobody else is pushing.
-      - label=awaiting-human
-      # Automatic rules are not covered by commands_restrictions, and anyone
-      # with read access can open a pull request off an existing branch of a
-      # public repo. Without this, that stranger's pull request would have
-      # Mergify write a merge commit into a branch they cannot push to.
-      - or:
-          - author=mark-brannan
-          # Every bot here is a GitHub App the owner installed -- dependabot,
-          # and each repository's own release-please app, whose login is
-          # named after the repository -- so a bot author is trusted by
-          # construction rather than by listing.
-          - author~=\[bot\]$
-          # A fork's head branch is outside this repository.
-          - from-fork
+      - -label=blocked
+      - "#check-failure=0"
+      - label=merge
     actions:
-      update: {}
+      queue:
+        name: default
 
   - name: Merge dependabot updates once the gate is green
     conditions:
