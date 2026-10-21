@@ -1,16 +1,16 @@
 name: pr-title
 
-# A squash merge takes the pull request title as the commit subject, so the
-# title is the one line of history that every repo's log is read by. The
-# repos' own convention is `area: summary` ("settings: deny the Mergify
-# stack skill (#76)"); this check holds a title to that shape and nothing
-# more -- it does not choose among areas, and it does not require
-# conventional-commit types, though it accepts one with a scope
-# ("fix(schema): ...", release-please's "chore(main): release 1.2.0").
-# A repo that releases with release-please passes `conventional: true`:
-# release-please reads only conventional types, so an `area: summary` title
-# never reaches a release. There the area moves into the scope:
-# "fix(doctor): ...".
+# A squash merge takes the pull request title as the commit subject (each
+# calling repo sets its squash commit title to "pull request title"; the
+# default uses a lone commit's own subject instead), so the title is the one
+# line of history that every repo's log is read by, and the line
+# release-please reads. The shape is `type(area): summary`
+# ("fix(doctor): the version row sits under Claude Code"), the same in every
+# repo whether or not it releases, so history reads alike everywhere and a
+# repo that starts releasing needs no change. The check holds a title to
+# that shape and nothing more -- it does not choose among types or areas.
+# `conventional: false` relaxes it to `area: summary`, for a repo whose
+# history should not carry types.
 #
 # Reusable, like nonempty-diff: callers list it in their ci-gate `needs`, so
 # it costs no ruleset entry. Cost: one job of seconds per PR event. Callers
@@ -28,9 +28,9 @@ on:
       conventional:
         description: >-
           Require a conventional-commit type, `type(area): summary`, as
-          release-please reads them.
+          release-please reads them; false accepts `area: summary`.
         type: boolean
-        default: false
+        default: true
 
 permissions: {}
 
@@ -48,8 +48,8 @@ jobs:
           # area: lowercase word, may hold . / _ - ; an optional (scope) and
           # !; then a colon, a space and a summary
           PATTERN: '^[a-z][a-z0-9._/-]*(\([^)]+\))?!?: [^ ].*$'
-          # a type release-please knows, then an optional (area)
-          CONVENTIONAL: '^(feat|fix|perf|revert|docs|deps|chore|ci|test|build|refactor|style)(\([^)]+\))?!?: [^ ].*$'
+          # a type release-please knows, then a required (area)
+          CONVENTIONAL: '^(feat|fix|perf|revert|docs|deps|chore|ci|test|build|refactor|style)\([^)]+\)!?: [^ ].*$'
           USE_CONVENTIONAL: ${{ inputs.conventional }}
         run: |
           set -euo pipefail
