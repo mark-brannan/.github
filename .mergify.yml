@@ -4,7 +4,8 @@
 #     extends: .github
 #
 # and overrides a rule by restating it under the same name. Mergify does three
-# things here, and none of them needs a comment or a click.
+# things here; only a human merge (1 and 3) needs a click: the `merge` label or
+# a `@mergifyio queue` comment.
 #
 # 1. It brings a pull request up to date with main only when it is about to
 #    merge, through the queue. The branch ruleset requires branches to be up
