@@ -14,8 +14,9 @@
 #    queue updates one, checks it once, merges it, then takes the next.
 # 2. It merges dependabot's updates once the gate is green. Dependabot is the
 #    volume, and the part nobody is really reviewing.
-# 3. It offers the merge queue for anything else, on request: `@mergifyio queue`.
-#    That is how a human pull request merges, so it lands on current main.
+# 3. It merges a human pull request through the queue when the `merge` label
+#    goes on, or on a `@mergifyio queue` comment, so it lands on current main.
+#    The label is the one click that replaces the Merge button.
 #
 # Human pull requests are deliberately NOT auto-merged. The ruleset requires no
 # approvals, so an automatic trigger would land work in progress the moment CI
@@ -52,6 +53,18 @@ queue_rules:
       - check-success=ci-gate / gate
 
 pull_request_rules:
+  - name: Queue a pull request when the merge label goes on
+    # The one-click way in. Only someone with triage access can label, so the
+    # label is the human's say-so; the queue still waits on the gate.
+    conditions:
+      - base=main
+      - -draft
+      - -conflict
+      - label=merge
+    actions:
+      queue:
+        name: default
+
   - name: Merge dependabot updates once the gate is green
     conditions:
       - base=main
