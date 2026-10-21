@@ -56,11 +56,14 @@ queue_rules:
 pull_request_rules:
   - name: Queue a pull request when the merge label goes on
     # The one-click way in. Only someone with triage access can label, so the
-    # label is the human's say-so; the queue still waits on the gate.
+    # label is the human's say-so; the queue still waits on the gate. blocked
+    # still wins, and a red check outside the gate (secret-scan) still holds.
     conditions:
       - base=main
       - -draft
       - -conflict
+      - -label=blocked
+      - "#check-failure=0"
       - label=merge
     actions:
       queue:
