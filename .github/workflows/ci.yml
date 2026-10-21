@@ -44,6 +44,12 @@ jobs:
       contents: read
     uses: ./.github/workflows/nonempty-diff.yml
 
+  # The title is the squash commit's subject -- see pr-title.yml.
+  pr-title:
+    permissions:
+      pull-requests: read
+    uses: ./.github/workflows/pr-title.yml
+
   # Full-history secret scan -- see secret-scan.yml for why gitleaks and
   # trufflehog are both needed and why trufflehog's redaction has to be
   # inline. No gitleaks-config: this repo has no .gitleaks.toml.
@@ -120,7 +126,7 @@ jobs:
   # The single required status check. `always()` lets it evaluate when a
   # dependency failed or was skipped instead of inheriting the skip.
   ci-gate:
-    needs: [nonempty, secret-scan, complexity-tests, duplication-tests, golden-diff-tests, show-dont-tell-tests, review-metrics-tests]
+    needs: [nonempty, pr-title, secret-scan, complexity-tests, duplication-tests, golden-diff-tests, show-dont-tell-tests, review-metrics-tests]
     if: always()
     permissions: {}
     uses: ./.github/workflows/ci-gate.yml
