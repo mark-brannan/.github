@@ -19,8 +19,13 @@ name: pr-title
 # fix for a bad title is to edit it and re-run this job -- a re-run replays
 # the original event, whose payload still holds the old title.
 #
-# Exempt: a non-PR run (push to main) has no title, and a bot's PR
-# (Dependabot, release-please) has a title nobody edits by hand.
+# A push run checks the title of the open pull request whose head is the
+# pushed commit, so a caller that also runs on branch pushes gets the same
+# verdict from both `ci-gate / gate` runs -- except on a push made before
+# its pull request is opened, which finds none and passes. The cure for that
+# is in the caller: run push CI on the default branch only. Exempt: a push
+# with no open pull request has no title, and a bot's PR (Dependabot,
+# release-please) has a title nobody edits by hand.
 
 on:
   workflow_call:
@@ -45,6 +50,7 @@ jobs:
           NUMBER: ${{ github.event.pull_request.number }}
           EVENT_TITLE: ${{ github.event.pull_request.title }}
           AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          SHA: ${{ github.sha }}
           # area: lowercase word, may hold . / _ - ; an optional (scope) and
           # !; then a colon, a space and a summary
           PATTERN: '^[a-z][a-z0-9._/-]*(\([^)]+\))?!?: [^ ].*$'
@@ -54,8 +60,15 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$NUMBER" ]; then
-            echo "not a pull request: no title to check"
-            exit 0
+            if ! OPEN=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '[.[] | select(.state == "open" and .head.sha == env.SHA)][0] | select(.) | "\(.number) \(.user.type) \(.title)"'); then
+              echo "::warning::could not look up a pull request for $SHA: title not checked"
+              exit 0
+            fi
+            if [ -z "$OPEN" ]; then
+              echo "no open pull request for $SHA: no title to check"
+              exit 0
+            fi
+            read -r NUMBER AUTHOR_TYPE EVENT_TITLE <<<"$OPEN"
           fi
           if [ "$AUTHOR_TYPE" = Bot ]; then
             echo "opened by a bot: title not checked"
