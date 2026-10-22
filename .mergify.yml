@@ -4,7 +4,7 @@
 #     extends: .github
 #
 # and overrides a rule by restating it under the same name. Mergify does three
-# things here; only a human merge (1 and 3) needs a click: the `merge` label or
+# things here; only a reviewed merge (1 and 3) needs a click: the `merge` label or
 # a `@mergifyio queue` comment.
 #
 # 1. It brings a pull request up to date with main only when it is about to
@@ -15,7 +15,7 @@
 #    queue updates one, checks it once, merges it, then takes the next.
 # 2. It merges dependabot's updates once the gate is green. Dependabot is the
 #    volume, and the part nobody is really reviewing.
-# 3. It merges a human pull request through the queue when the `merge` label
+# 3. It merges any other pull request through the queue when the `merge` label
 #    goes on, or on a `@mergifyio queue` comment, so it lands on current main.
 #    The label is the one click that replaces the Merge button.
 #
