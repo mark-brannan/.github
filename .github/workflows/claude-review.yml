@@ -743,3 +743,25 @@ jobs:
         with:
           path: .claude-reviewed-head
           key: claude-review-head-pr${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+
+      # The cost of this run (mark-brannan/claude#219): the execution file
+      # ends in the CLI's `result` message, which carries total_cost_usd and
+      # usage. One JSON line with the fields bin/agent-decision logs for its
+      # judge, as a job summary and as the headless-run artifact.
+      - if: always() && steps.gate.outputs.run == 'true' && steps.review.outputs.execution_file != ''
+        name: Record the cost of this run
+        env:
+          EXEC: ${{ steps.review.outputs.execution_file }}
+          MODEL: ${{ steps.triage.outputs.model }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          jq -c --arg model "$MODEL" --arg repo "$GITHUB_REPOSITORY" --argjson pr "$PR" \
+            '[.[] | select(.type == "result")] | last // {} | {ts: (now | todate), what: "claude-review", repo: $repo, pr: $pr,
+              model: $model, total_cost_usd, usage, outcome: (.subtype // "no result")}' "$EXEC" > headless-run.jsonl
+          { echo '### Headless run cost'; echo '```json'; cat headless-run.jsonl; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - if: always() && hashFiles('headless-run.jsonl') != ''
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: headless-run
+          path: headless-run.jsonl
