@@ -25,14 +25,15 @@ name: Claude PR Review
 #
 # and tailors it through the inputs below: its own `prompt` where the generic
 # one is not enough, extra `allowed-tools`, a `node-version` to review
-# against. `allowed-bots` defaults to `mergify[bot],mark-brannan-release-please[bot]`
-# -- claude-code-action refuses non-human actors by default, and those two
-# are the shared org-wide bots: Mergify re-runs checks on every repo, and the
-# shared release-please app opens the release PR wherever it's installed. A
-# repo not using one is unaffected -- the bot just never shows up as an
-# actor there. A repo with a genuinely different bot of its own (an older,
-# repo-specific release-please app, say) overrides the input with all three:
-# `allowed-bots: mergify[bot],mark-brannan-release-please[bot],its-own-bot-login`.
+# against. claude-code-action refuses non-human actors by default, so the
+# shared org-wide bots are always allowed: Mergify re-runs checks on every
+# repo, the shared release-please app opens the release PR wherever it's
+# installed, claude[bot] pushes @claude fixes, and mark-brannan-agent[bot]
+# opens agent pull requests. A repo not using one is unaffected -- the bot
+# just never shows up as an actor there. A repo with a genuinely different
+# bot of its own (an older, repo-specific release-please app, say) adds it
+# with `allowed-bots: its-own-bot-login`; the input extends the shared list,
+# so a new shared bot lands here once rather than in every caller.
 #
 # A run costs real tokens, so it only happens when the pull request's
 # content has changed. `synchronize` also fires on every rebase -- and
@@ -184,10 +185,10 @@ on:
         type: boolean
         default: true
       allowed-bots:
-        description: Bot logins whose pull requests are reviewed anyway (the action refuses non-human actors by default). Overriding replaces this default, so include mergify[bot] and mark-brannan-release-please[bot] in the override too.
+        description: Bot logins whose pull requests are reviewed anyway, added to the shared org-wide bots that are always allowed (mergify, the shared release-please app, claude, mark-brannan-agent)
         required: false
         type: string
-        default: 'mergify[bot],mark-brannan-release-please[bot]'
+        default: ''
       node-version:
         description: Node version to set up before the review; empty leaves the runner's
         required: false
@@ -659,7 +660,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
-          allowed_bots: ${{ inputs.allowed-bots }}
+          allowed_bots: mergify[bot],mark-brannan-release-please[bot],claude[bot],mark-brannan-agent[bot],${{ inputs.allowed-bots }}
           plugin_marketplaces: ${{ inputs.seed-home && 'https://github.com/mark-brannan/languette.git' || '' }}
           plugins: ${{ inputs.seed-home && 'languette@languette' || '' }}
           prompt: |

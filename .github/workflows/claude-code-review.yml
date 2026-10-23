@@ -28,9 +28,6 @@ jobs:
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
     with:
-      # Overriding replaces the default list rather than extending it, so all
-      # three must be named (see dotfiles#195).
-      allowed-bots: mergify[bot],mark-brannan-release-please[bot],claude[bot]
       prompt: |
         Review this pull request to mark-brannan/.github, the organisation's
         shared-defaults repository.
