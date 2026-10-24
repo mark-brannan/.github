@@ -28,9 +28,10 @@ name: Claude PR Review
 #                    that reaches a risky path or a governing document. A
 #                    governing document gets it even when the review skips
 #                    it: a bot's finding there is evidence, never a ruling,
-#                    but the owner still wants to see who it could harm. Once
-#                    per content, and to the job summary, so the bot's
-#                    comments on the pull request stay a count of reviews.
+#                    but a document that governs every later decision is
+#                    where an effect on people matters most. Once per
+#                    content, and to the job summary, so the bot's comments
+#                    on the pull request stay a count of reviews.
 #
 # A repository that runs without the seeded home has no skills to run: its
 # review falls back to the generic brief below and the other two checks
