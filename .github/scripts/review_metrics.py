@@ -86,7 +86,8 @@ CAP = 1000  # GitHub lists at most this many runs for a filtered query (#73)
 FLOOR = 2000  # calls --pace leaves in the hourly budget for every other session
 STAMP = re.compile(r"^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ?")
 TRIAGE = re.compile(r"^##\[notice\]review triage: (skip|default|deep) \((.*)\)\s*$")
-EFFORT = re.compile(r"^\s+claude_args: .*--effort\s+([a-z]+)")
+ARGS = re.compile(r"^\s+claude_args: ")
+EFFORT = re.compile(r"--effort\s+([a-z]+)")
 CLASSES = re.compile(r"^\s+CLASSES: ((?:[a-z]+=\d+ ?)+)$")
 FIXED = re.compile(r"\b(fixed|done|addressed|applied|resolved in|in [0-9a-f]{7,40})\b", re.I)
 DECLINED = re.compile(r"\b(no|not|won't|wontfix|disagree|by design|intended|intentional|keep(ing)?|kept|"
@@ -138,11 +139,15 @@ def gh_json(*args, soft=False):
 
 
 def parse_log(text):
-    """The run's model, cost, turns, wall time, tier and effort, from one job log."""
+    """The run's model, cost, turns, wall time, tier and effort, from one job log.
+    The job runs the review first and then the checks beside it, each its own
+    action invocation with its own init, result and claude_args, so only the
+    first of each is the review's."""
     lines = [STAMP.sub("", ln) for ln in text.splitlines()]
     out = {"model": "", "cost": None, "turns": None, "ms": None, "tier": "", "why": "", "effort": "",
            "paths": ""}
     i = 0
+    seen_args = False
     while i < len(lines):
         ln = lines[i]
         if ln == "{":
@@ -154,8 +159,8 @@ def parse_log(text):
             except ValueError:
                 msg = None
             if isinstance(msg, dict) and msg.get("type") == "system" and msg.get("subtype") == "init":
-                out["model"] = msg.get("model") or out["model"]
-            elif isinstance(msg, dict) and msg.get("type") == "result":
+                out["model"] = out["model"] or msg.get("model") or ""
+            elif isinstance(msg, dict) and msg.get("type") == "result" and out["cost"] is None:
                 out["cost"] = msg.get("total_cost_usd")
                 out["turns"] = msg.get("num_turns")
                 out["ms"] = msg.get("duration_ms")
@@ -164,9 +169,13 @@ def parse_log(text):
         m = TRIAGE.search(ln)
         if m:
             out["tier"], out["why"] = m.group(1), m.group(2)
-        m = EFFORT.search(ln)
-        if m:
-            out["effort"] = m.group(1)
+        # The first claude_args line is the review's, whatever it holds: a
+        # default-tier review passes no --effort, and a later check's must
+        # not stand in for it.
+        if ARGS.search(ln) and not seen_args:
+            seen_args = True
+            m = EFFORT.search(ln)
+            out["effort"] = m.group(1) if m else ""
         m = CLASSES.search(ln)
         if m:
             out["paths"] = "+".join(k for k, v in (kv.split("=") for kv in m.group(1).split()) if v != "0") or "none"
