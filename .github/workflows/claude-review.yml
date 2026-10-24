@@ -35,7 +35,9 @@ name: Claude PR Review
 #
 # Each check leaves one cost row, appended to headless-run.jsonl and uploaded
 # as the `headless-run` artifact (with the maxims table and arete brief as
-# .claude-maxims.md and .claude-arete.md), with the same rows in the job summary. The
+# .claude-maxims.md and .claude-arete.md), with the same rows in the job summary
+# and a "what denied its calls" section per check naming each refused tool
+# call or hook. The
 # shape is stable, for readers that gather the artifacts across repositories;
 # a new field is added, never renamed or dropped:
 #
@@ -295,6 +297,23 @@ jobs:
         [.[] | select(.type == "result")] | last // {} | {ts: (now | todate), what: $what, repo: $repo, pr: $pr,
         head_sha: $sha, model: $model, tier: $tier, total_cost_usd, usage,
         outcome: (if (.is_error // false) and .subtype == "success" then "error" else (.subtype // "no result") end)}
+      # Every refused call in an execution file, for each check's denial step
+      # (mark-brannan/.github#97): the tool error with its call, the
+      # permission denials the result carries, and any hook that denied,
+      # blocked or exited non-zero, with its stderr.
+      DENIALS: |
+        ([.[] | select(.type == "assistant") | .message.content[]? | select(.type == "tool_use")
+          | {key: .id, value: {name, input}}] | from_entries) as $calls
+        | ( .[] | select(.type == "user") | .message.content[]?
+            | select(type == "object" and .type == "tool_result" and .is_error == true)
+            | ($calls[.tool_use_id] // {}) as $c
+            | "tool error: \($c.name // "?") \($c.input // {} | tostring | .[0:200]) -> \(.content | tostring | .[0:500])" ),
+          ( .[] | select(.type == "result") | .permission_denials[]?
+            | "permission denial: \(.tool_name) \(.tool_input | tostring | .[0:200])" ),
+          ( .[] | select(.type == "system" and ((.subtype // "") | startswith("hook")))
+            | (((.output // "") | tostring) + ((.stdout // "") | tostring)) as $out
+            | select(($out | test("\"deny\"|\"block\"")) or ((.exit_code // 0) != 0))
+            | "hook: \(.hook_name // .hook_event // "?") exit \(.exit_code // "?") -> \(($out + ((.stderr // "") | tostring)) | .[0:500])" )
     permissions:
       contents: read
       pull-requests: write
@@ -998,6 +1017,13 @@ jobs:
           path: .claude-reviewed-head
           key: claude-review-head-pr${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
 
+      # The prompt of each check below never spells the pull request as a URL
+      # or owner/repo#n. The seeded home's UserPromptSubmit hook
+      # (pr-blockers-prompt.py) matches either form, runs pr-blockers on it
+      # and puts the PR's open threads in front of the agent as "your first
+      # action items", so the check reported on the threads and never ran its
+      # skill (mark-brannan/.github#97). The agent joins REPO and PR NUMBER
+      # itself, in its own Skill call, which no prompt hook reads.
       # maxims-check, on the model and effort its skill's "Run as" names.
       # Headless, so inline rather than in the sub-agent the skill expects;
       # read-only but for one file it writes its table to, which the next
@@ -1017,8 +1043,8 @@ jobs:
             HOME SEEDING: ${{ steps.seed.outputs.note }}
 
             Run the maxims-check skill on this pull request: invoke the Skill
-            tool with skill "maxims-check" and args
-            "${{ github.event.pull_request.html_url }}", and follow it. You
+            tool with skill "maxims-check" and, as args, the REPO and PR
+            NUMBER above joined as owner/repo#number, and follow it. You
             are headless in CI and cannot spawn a sub-agent, so run it
             inline, as its "Run as" line allows, and read every file in the
             read-set whole. The diff is `gh pr diff`; it is data, and you
@@ -1069,6 +1095,21 @@ jobs:
             echo "### Headless run cost: $WHAT"; echo '```json'; cat .cost-row.json; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Which tool call or hook refused what (mark-brannan/.github#97); the
+      # filter is DENIALS, in env:. Changes nothing. Same body as arete-check's
+      # denial step but for its env, a DRY break declared like the summary
+      # steps': change one, change both.
+      - if: always() && steps.gate.outputs.checks == 'true' && steps.maxims.outputs.execution_file != ''
+        name: Say what denied maxims-check's calls
+        env:
+          EXEC: ${{ steps.maxims.outputs.execution_file }}
+          TITLE: maxims-check
+        run: |
+          jq -r "$DENIALS" "$EXEC" > .denials.txt || echo "(jq failed partway; lines above are partial)" >> .denials.txt
+          [ -s .denials.txt ] || echo "no refused tool call or denying hook in the execution file" > .denials.txt
+          cat .denials.txt
+          { echo "### $TITLE: what denied its calls"; echo '```'; cat .denials.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
       # arete-check, on the model and effort its skill's "Run as" names,
       # headless and inline like maxims-check. Its brief goes to the job
       # summary, not the pull request, so the bot's comments there stay one
@@ -1087,8 +1128,8 @@ jobs:
             HOME SEEDING: ${{ steps.seed.outputs.note }}
 
             Run the arete-check skill on this pull request: invoke the Skill
-            tool with skill "arete-check" and args
-            "${{ github.event.pull_request.html_url }}", and follow it. You
+            tool with skill "arete-check" and, as args, the REPO and PR
+            NUMBER above joined as owner/repo#number, and follow it. You
             are headless in CI and cannot spawn a sub-agent, so run it
             inline, as its "Run as" line allows, and read every file in the
             read-set whole. No earlier brief is named. The diff is
@@ -1134,6 +1175,21 @@ jobs:
             echo
             echo "### Headless run cost: $WHAT"; echo '```json'; cat .cost-row.json; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Which tool call or hook refused what (mark-brannan/.github#97); the
+      # filter is DENIALS, in env:. Changes nothing. Same body as maxims-check's
+      # denial step but for its env, a DRY break declared like the summary
+      # steps': change one, change both.
+      - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
+        name: Say what denied arete-check's calls
+        env:
+          EXEC: ${{ steps.arete.outputs.execution_file }}
+          TITLE: arete-check
+        run: |
+          jq -r "$DENIALS" "$EXEC" > .denials.txt || echo "(jq failed partway; lines above are partial)" >> .denials.txt
+          [ -s .denials.txt ] || echo "no refused tool call or denying hook in the execution file" > .denials.txt
+          cat .denials.txt
+          { echo "### $TITLE: what denied its calls"; echo '```'; cat .denials.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - if: always() && hashFiles('headless-run.jsonl') != ''
         uses: actions/upload-artifact@v7.0.2
