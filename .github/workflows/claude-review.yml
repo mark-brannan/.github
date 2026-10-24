@@ -309,8 +309,9 @@ jobs:
           ( .[] | select(.type == "result") | .permission_denials[]?
             | "permission denial: \(.tool_name) \(.tool_input | tostring | .[0:200])" ),
           ( .[] | select(.type == "system" and ((.subtype // "") | startswith("hook")))
-            | select(((.output // "") + (.stdout // "") | tostring | test("\"deny\"|\"block\"")) or ((.exit_code // 0) != 0))
-            | "hook: \(.hook_name // .hook_event // "?") exit \(.exit_code // "?") -> \(((.output // "") + (.stdout // "") + (.stderr // "")) | tostring | .[0:500])" )
+            | (((.output // "") | tostring) + ((.stdout // "") | tostring)) as $out
+            | select(($out | test("\"deny\"|\"block\"")) or ((.exit_code // 0) != 0))
+            | "hook: \(.hook_name // .hook_event // "?") exit \(.exit_code // "?") -> \(($out + ((.stderr // "") | tostring)) | .[0:500])" )
     permissions:
       contents: read
       pull-requests: write
@@ -1103,7 +1104,7 @@ jobs:
           EXEC: ${{ steps.maxims.outputs.execution_file }}
           TITLE: maxims-check
         run: |
-          jq -r "$DENIALS" "$EXEC" > .denials.txt || echo "(could not read the execution file)" > .denials.txt
+          jq -r "$DENIALS" "$EXEC" > .denials.txt || echo "(jq failed partway; lines above are partial)" >> .denials.txt
           [ -s .denials.txt ] || echo "no refused tool call or denying hook in the execution file" > .denials.txt
           cat .denials.txt
           { echo "### $TITLE: what denied its calls"; echo '```'; cat .denials.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
@@ -1185,7 +1186,7 @@ jobs:
           EXEC: ${{ steps.arete.outputs.execution_file }}
           TITLE: arete-check
         run: |
-          jq -r "$DENIALS" "$EXEC" > .denials.txt || echo "(could not read the execution file)" > .denials.txt
+          jq -r "$DENIALS" "$EXEC" > .denials.txt || echo "(jq failed partway; lines above are partial)" >> .denials.txt
           [ -s .denials.txt ] || echo "no refused tool call or denying hook in the execution file" > .denials.txt
           cat .denials.txt
           { echo "### $TITLE: what denied its calls"; echo '```'; cat .denials.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
