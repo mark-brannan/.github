@@ -25,13 +25,12 @@ name: Claude PR Review
 #                    where the owner reads it at leisure, never to a thread a
 #                    merge would wait on.
 #   arete-check      what the change does to the people it touches, on a diff
-#                    that reaches a risky path or a governing document. A
-#                    governing document gets it even when the review skips
-#                    it: a bot's finding there is evidence, never a ruling,
-#                    but a document that governs every later decision is
-#                    where an effect on people matters most. Once per
-#                    content, and to the job summary, so the bot's comments
-#                    on the pull request stay a count of reviews.
+#                    that reaches a risky path or a governing document, at
+#                    any size, even when the review itself skips: a document
+#                    that governs every later decision is where an effect on
+#                    people matters most. Once per content, and to the job
+#                    summary, so the bot's comments on the pull request stay
+#                    a count of reviews.
 #
 # A repository that runs without the seeded home has no skills to run: its
 # review falls back to the generic brief below and the other two checks
@@ -91,20 +90,23 @@ name: Claude PR Review
 # and the diff before anything is installed and picks one of three tiers:
 #
 #   skip     a `review:skip` label; a Dependabot PR; a lockfile-only diff; a
-#            diff of governing documents alone (the design set the mixed-loops
-#            guard names: CLAUDE.md, .claude/rules, ADRs, decisions -- a bot's
-#            comment there is evidence, never a ruling, so it is mostly noise;
-#            arete-check still runs on it);
-#            a docs-only diff under `docs-skip-lines`; any diff under
-#            `skip-under-lines` that touches no risky path; a follow-up --
+#            docs-only diff under `docs-skip-lines` (off by default); any diff
+#            under `skip-under-lines` that touches no risky path and no
+#            governing document (the design set the mixed-loops guard names:
+#            CLAUDE.md, .claude/rules, ADRs, decisions); a follow-up --
 #            the bot has reviewed this pull request before -- whose changes
 #            since the last reviewed head touch no risky path's own lines
 #            (`followup-risky-only`; the `review:deep` label overrides it, and
 #            no recorded reviewed head to compare never skips).
-#   default  the caller's `model`, no effort flag.
+#   default  the caller's `model`, no effort flag. A governing document is
+#            reviewed here at any size and never escalates by path or size.
+#            It once skipped, since a bot's comment there is evidence, never
+#            a ruling; critical-review now routes such a finding to its
+#            Reversed and Decide lines and never edits, so the review costs
+#            the document nothing and can still catch what it breaks.
 #   deep     a `review:deep` label; a risky path (anything under .github/,
 #            actions, Mergify, CODEOWNERS, hooks, settings, Dockerfiles); a diff over
-#            `deep-over-lines`. Runs on `deep-model` with `--effort deep-effort`.
+#            `deep-over-lines` outside governing documents. Runs on `deep-model` with `--effort deep-effort`.
 #            Escalation is paid once per pull request: once any review of it
 #            is on record (a recorded fingerprint, or any comment from the
 #            bot), a later push escalated by path or size runs at default.
@@ -175,10 +177,10 @@ on:
         type: number
         default: 10
       docs-skip-lines:
-        description: A docs-only diff (markdown, text) with at most this many changed lines is not reviewed; 0 disables
+        description: A docs-only diff (markdown, text) with at most this many changed lines is not reviewed; 0, the default, disables it, so docs fall under skip-under-lines like code
         required: false
         type: number
-        default: 50
+        default: 0
       deep-over-lines:
         description: A diff with more changed lines than this gets the deep tier
         required: false
@@ -389,12 +391,14 @@ jobs:
             esac
             return 1
           }
-          files=0 lock=0 design=0 docs=0 risky=0 code=0 lines=0
+          files=0 lock=0 design=0 docs=0 risky=0 code=0 lines=0 design_lines=0
           while IFS=$'\t' read -r add del f; do
             [ -n "$f" ] || continue
             files=$((files + 1))
-            [ "$add" = "-" ] || lines=$((lines + add))
-            [ "$del" = "-" ] || lines=$((lines + del))
+            n=0
+            [ "$add" = "-" ] || n=$((n + add))
+            [ "$del" = "-" ] || n=$((n + del))
+            lines=$((lines + n))
             case "$f" in
               package-lock.json|*/package-lock.json|npm-shrinkwrap.json|yarn.lock|pnpm-lock.yaml|\
               Cargo.lock|poetry.lock|uv.lock|Pipfile.lock|Gemfile.lock|composer.lock|go.sum|flake.lock)
@@ -402,7 +406,7 @@ jobs:
               CLAUDE.md|*/CLAUDE.md|.claude/rules/*|.claude/docs/*|\
               docs/decisions.md|docs/references.md|docs/adr/*|*.adr.md|docs/curia/*|\
               .claude/skills/curia/*|.claude/skills/agora/*)
-                design=$((design + 1)) ;;
+                design=$((design + 1)) design_lines=$((design_lines + n)) ;;
               *)
                 if risky_path "$f"; then risky=$((risky + 1))
                 else
@@ -447,16 +451,16 @@ jobs:
               decision=skip reason="Dependabot pull request"
             elif [ "$files" -gt 0 ] && [ "$lock" -eq "$files" ]; then
               decision=skip reason="lockfile-only diff"
-            elif [ "$files" -gt 0 ] && [ "$design" -eq "$files" ]; then
-              decision=skip reason="governing documents only (a bot's comment there is evidence, never a ruling)"
             elif [ "$files" -gt 0 ] && [ "$docs" -eq "$files" ] && [ "$DOCS_SKIP" -gt 0 ] && [ "$lines" -le "$DOCS_SKIP" ]; then
               decision=skip reason="docs-only diff of $lines lines (at most $DOCS_SKIP)"
-            elif [ "$risky" -eq 0 ] && [ "$SKIP_UNDER" -gt 0 ] && [ "$lines" -le "$SKIP_UNDER" ]; then
-              decision=skip reason="$lines changed lines (at most $SKIP_UNDER), no risky path"
+            elif [ "$risky" -eq 0 ] && [ "$design" -eq 0 ] && [ "$SKIP_UNDER" -gt 0 ] && [ "$lines" -le "$SKIP_UNDER" ]; then
+              decision=skip reason="$lines changed lines (at most $SKIP_UNDER), no risky path or governing document"
             elif [ "$risky" -gt 0 ]; then
               decision=deep reason="$risky risky path(s): anything under .github/, actions, Mergify, CODEOWNERS, hooks, settings or Dockerfiles"
-            elif [ "$lines" -gt "$DEEP_OVER" ]; then
-              decision=deep reason="$lines changed lines (more than $DEEP_OVER)"
+            elif [ $((lines - design_lines)) -gt "$DEEP_OVER" ]; then
+              # A governing document's lines never escalate: it is reviewed
+              # at any size, at default.
+              decision=deep reason="$((lines - design_lines)) changed lines outside governing documents (more than $DEEP_OVER)"
             fi
             if [ "$decision" = deep ] && { [ -n "${PRIOR:-}" ] || [ "$reviews" != 0 ]; }; then
               decision=default reason="$reason; this PR already had a review (or its count failed), so a follow-up runs at default"
@@ -531,8 +535,8 @@ jobs:
           fi
 
           # arete-check's gate: a risky path or a governing document at any
-          # size. The governing-documents-only skip above is the review's, not
-          # this; only a reason for no review at all stops it.
+          # size. The review's own skips -- size, follow-up, cap -- are not
+          # this gate's; only a reason for no review at all stops it.
           arete=false arete_reason="no risky path or governing document in the diff"
           if [ "$risky" -gt 0 ] || [ "$design" -gt 0 ]; then
             arete=true arete_reason="$risky risky path(s), $design governing document(s)"
