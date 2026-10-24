@@ -181,7 +181,7 @@ on:
         type: number
         default: 4
       risky-paths:
-        description: Extra risky paths, one shell glob per line (or space-separated), matched against each changed path from the repo root like `hooks/*` or `settings.*.json`; added to the built-in list, never replacing it. For a repo whose hooks and settings sit at the root rather than under .claude/.
+        description: Extra risky paths, one shell glob per line (or space-separated), matched against each changed path from the repo root like `hooks/*` or `settings.*.json`; added to the built-in list, never replacing it. The built-in lockfile and governing-document classes are tried first, so a glob for one of those has no effect on the tier. For a repo whose hooks and settings sit at the root rather than under .claude/.
         required: false
         type: string
         default: ''
