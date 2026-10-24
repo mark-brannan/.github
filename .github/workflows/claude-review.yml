@@ -487,7 +487,7 @@ jobs:
             elif [ "$risky" -eq 0 ] && [ "$design" -eq 0 ] && [ "$SKIP_UNDER" -gt 0 ] && [ "$lines" -le "$SKIP_UNDER" ]; then
               decision=skip reason="$lines changed lines (at most $SKIP_UNDER), no risky path or governing document"
             elif [ "$risky" -gt 0 ]; then
-              decision=deep reason="$risky risky path(s): anything under .github/, actions, Mergify, CODEOWNERS, hooks, settings, Dockerfiles${RISKY_PATHS:+ or the caller's risky-paths}"
+              decision=deep reason="$risky risky path(s): anything under .github/, actions, Mergify, CODEOWNERS, hooks, settings, Dockerfiles${RISKY_PATHS:+ or a path in the caller-listed risky-paths}"
             elif [ $((lines - design_lines)) -gt "$DEEP_OVER" ]; then
               # A governing document's lines never escalate: it is reviewed
               # at any size, at default.
