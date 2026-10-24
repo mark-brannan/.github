@@ -34,7 +34,8 @@ name: Claude PR Review
 # numbers later.
 #
 # Each check leaves one cost row, appended to headless-run.jsonl and uploaded
-# as the `headless-run` artifact, with the same rows in the job summary. The
+# as the `headless-run` artifact (with the maxims table and arete brief as
+# .claude-maxims.md and .claude-arete.md), with the same rows in the job summary. The
 # shape is stable, for readers that gather the artifacts across repositories;
 # a new field is added, never renamed or dropped:
 #
@@ -1138,4 +1139,12 @@ jobs:
         uses: actions/upload-artifact@v7.0.2
         with:
           name: headless-run
-          path: headless-run.jsonl
+          # The two reports ride along so a reader that gathers the artifact
+          # keeps them past the job summary's life. They are dotfiles, which
+          # the action skips unless told otherwise; a check that left none
+          # simply adds nothing.
+          path: |
+            headless-run.jsonl
+            .claude-maxims.md
+            .claude-arete.md
+          include-hidden-files: true
