@@ -75,6 +75,36 @@ class ParseLog(unittest.TestCase):
         self.assertEqual((f["tier"], f["effort"], f["paths"]), ("deep", "high", "docs+risky"))
         self.assertTrue(f["why"].startswith("2 risky path(s)"))
 
+    def test_checks_after_the_review_are_not_the_review(self):
+        f = rm.parse_log(LOG + "\n" + stamped('''  claude_args: --model claude-sonnet-5-5 --effort medium
+{
+  "type": "system",
+  "subtype": "init",
+  "model": "claude-sonnet-5-5"
+}
+{
+  "type": "result",
+  "subtype": "success",
+  "num_turns": 30,
+  "total_cost_usd": 0.35
+}'''))
+        self.assertEqual((f["model"], f["cost"], f["turns"], f["effort"]), ("claude-opus-5-5", 0.2222, 7, "high"))
+
+    def test_default_tier_review_takes_no_effort_from_a_later_check(self):
+        f = rm.parse_log(stamped('''  claude_args: --model "claude-sonnet-5-5"
+{
+  "type": "result",
+  "subtype": "success",
+  "total_cost_usd": 0.23
+}
+  claude_args: --model claude-sonnet-5-5 --effort medium
+{
+  "type": "result",
+  "subtype": "success",
+  "total_cost_usd": 0.35
+}'''))
+        self.assertEqual((f["effort"], f["cost"]), ("", 0.23))
+
     def test_skipped_run_spent_nothing(self):
         f = rm.parse_log(stamped("##[notice]review triage: skip (Dependabot pull request)\nall done"))
         self.assertIsNone(f["cost"])
