@@ -20,17 +20,32 @@ name: Claude PR Review
 #                    picks the family from the Co-Authored-By trailers before
 #                    anything starts; a headless run cannot switch model.
 #   maxims-check     the software maxims the diff breaks (DRY, YAGNI, POLA
-#                    and their rivals), every run the review runs. A table of
-#                    findings with no verdict, so it goes to the job summary
-#                    where the owner reads it at leisure, never to a thread a
-#                    merge would wait on.
-#   arete-check      what the change does to the people it touches, on a diff
-#                    that reaches a risky path or a governing document, at
-#                    any size, even when the review itself skips: a document
-#                    that governs every later decision is where an effect on
-#                    people matters most. Once per content, and to the job
-#                    summary, so the bot's comments on the pull request stay
-#                    a count of reviews.
+#                    and their rivals). A table of findings with no verdict,
+#                    so it goes to the job summary where the owner reads it
+#                    at leisure, never to a thread a merge would wait on.
+#   arete-check      what the change does to the people it touches, the good
+#                    it does and the good it diminishes. A brief, to the job
+#                    summary too, so the bot's comments on the pull request
+#                    stay a count of reviews.
+#
+# Every run that reviews runs all three: one triage, one fingerprint, one
+# budget probe decide for the chain, so what a check costs per pull request
+# is measured rather than guessed, and a cheaper gate can be built on the
+# numbers later.
+#
+# Each check leaves one cost row, appended to headless-run.jsonl and uploaded
+# as the `headless-run` artifact, with the same rows in the job summary. The
+# shape is stable, for readers that gather the artifacts across repositories;
+# a new field is added, never renamed or dropped:
+#
+#   {"ts":"2026-10-24T09:12:03Z","what":"claude-maxims","repo":"mark-brannan/x",
+#    "pr":42,"head_sha":"4b45f6d...","model":"claude-sonnet-5-5","tier":"default",
+#    "total_cost_usd":0.35,"usage":{"input_tokens":...},"outcome":"success"}
+#
+#   what     claude-review, claude-maxims or claude-arete
+#   tier     triage's tier for the run (default or deep); the review's model
+#            follows it, the other two checks' models do not
+#   outcome  the CLI result's subtype, or "no result" when the run left none
 #
 # A repository that runs without the seeded home has no skills to run: its
 # review falls back to the generic brief below and the other two checks
@@ -90,20 +105,23 @@ name: Claude PR Review
 # and the diff before anything is installed and picks one of three tiers:
 #
 #   skip     a `review:skip` label; a Dependabot PR; a lockfile-only diff; a
-#            docs-only diff under `docs-skip-lines` (off by default); any diff
-#            under `skip-under-lines` that touches no risky path and no
-#            governing document (the design set the mixed-loops guard names:
-#            CLAUDE.md, .claude/rules, ADRs, decisions); a follow-up --
+#            follow-up --
 #            the bot has reviewed this pull request before -- whose changes
 #            since the last reviewed head touch no risky path's own lines
 #            (`followup-risky-only`; the `review:deep` label overrides it, and
-#            no recorded reviewed head to compare never skips).
+#            no recorded reviewed head to compare never skips). Off by
+#            default, for a caller to turn back on: a docs-only diff under
+#            `docs-skip-lines`; any diff under `skip-under-lines` that touches
+#            no risky path and no governing document (the design set the
+#            mixed-loops guard names: CLAUDE.md, .claude/rules, ADRs,
+#            decisions); a diff of governing documents alone
+#            (`skip-governing-docs`).
 #   default  the caller's `model`, no effort flag. A governing document is
 #            reviewed here at any size and never escalates by path or size.
-#            It once skipped, since a bot's comment there is evidence, never
-#            a ruling; critical-review now routes such a finding to its
-#            Reversed and Decide lines and never edits, so the review costs
-#            the document nothing and can still catch what it breaks.
+#            It once skipped by default, since a bot's comment there is
+#            evidence, never a ruling; critical-review routes such a finding
+#            to its Reversed and Decide lines and never edits, so the review
+#            costs the document nothing and can still catch what it breaks.
 #   deep     a `review:deep` label; a risky path (anything under .github/,
 #            actions, Mergify, CODEOWNERS, hooks, settings, Dockerfiles); a diff over
 #            `deep-over-lines` outside governing documents. Runs on `deep-model` with `--effort deep-effort`.
@@ -124,11 +142,6 @@ name: Claude PR Review
 # of preference, that coded none of it, or the least present when every one
 # did. The summary says which family was picked and why, and the review is
 # told so it does not flag the switch.
-#
-# arete-check has its own gate on the same triage: a diff touching a risky
-# path or a governing document, at any size, unless the `review:skip` label
-# or a Dependabot author says no review at all. It keeps its own
-# fingerprint, so a content it has assessed is not assessed again.
 #
 # Then, with the token in hand, a budget probe asks the plan's usage endpoint
 # how much of each rate window is used. Past `budget-pause-at` percent on any
@@ -172,15 +185,20 @@ on:
         type: string
         default: high
       skip-under-lines:
-        description: A diff with at most this many changed lines, touching no risky path, is not reviewed; 0 disables
-        required: false
-        type: number
-        default: 10
-      docs-skip-lines:
-        description: A docs-only diff (markdown, text) with at most this many changed lines is not reviewed; 0, the default, disables it, so docs fall under skip-under-lines like code
+        description: A diff with at most this many changed lines, touching no risky path and no governing document, is not reviewed; 0, the default, disables it
         required: false
         type: number
         default: 0
+      docs-skip-lines:
+        description: A docs-only diff (markdown, text) with at most this many changed lines is not reviewed; 0, the default, disables it
+        required: false
+        type: number
+        default: 0
+      skip-governing-docs:
+        description: A diff of governing documents alone (CLAUDE.md, .claude/rules, ADRs, decisions, curia) is not reviewed; false, the default, reviews it
+        required: false
+        type: boolean
+        default: false
       deep-over-lines:
         description: A diff with more changed lines than this gets the deep tier
         required: false
@@ -266,7 +284,7 @@ jobs:
       # One cost row from an execution file, for each check's record step.
       COST_ROW: >-
         [.[] | select(.type == "result")] | last // {} | {ts: (now | todate), what: $what, repo: $repo, pr: $pr,
-        model: $model, total_cost_usd, usage, outcome: (.subtype // "no result")}
+        head_sha: $sha, model: $model, tier: $tier, total_cost_usd, usage, outcome: (.subtype // "no result")}
     permissions:
       contents: read
       pull-requests: write
@@ -335,16 +353,6 @@ jobs:
           restore-keys: claude-review-pr${{ github.event.pull_request.number }}-
           lookup-only: true
 
-      # arete-check's own record, exact match only: it assesses a content
-      # once, whatever the review did with it.
-      - name: Skip arete-check if this content was already assessed
-        id: arete-seen
-        uses: actions/cache/restore@v6
-        with:
-          path: .claude-arete
-          key: claude-arete-pr${{ github.event.pull_request.number }}-${{ steps.fp.outputs.id }}
-          lookup-only: true
-
       # Which tier, from the labels, the author and the diff alone; the
       # path classes mirror the mixed-loops guard's design set and the review
       # prompt's own list of what to scrutinise. Every input reaches the
@@ -362,6 +370,7 @@ jobs:
           DEEP_MODEL: ${{ inputs.deep-model }}
           DEEP_EFFORT: ${{ inputs.deep-effort }}
           SKIP_UNDER: ${{ inputs.skip-under-lines }}
+          SKIP_GOVERNING: ${{ inputs.skip-governing-docs }}
           DOCS_SKIP: ${{ inputs.docs-skip-lines }}
           DEEP_OVER: ${{ inputs.deep-over-lines }}
           PRIOR: ${{ steps.seen.outputs.cache-matched-key }}
@@ -451,6 +460,8 @@ jobs:
               decision=skip reason="Dependabot pull request"
             elif [ "$files" -gt 0 ] && [ "$lock" -eq "$files" ]; then
               decision=skip reason="lockfile-only diff"
+            elif [ "$SKIP_GOVERNING" = true ] && [ "$files" -gt 0 ] && [ "$design" -eq "$files" ]; then
+              decision=skip reason="governing documents only (a bot's comment there is evidence, never a ruling)"
             elif [ "$files" -gt 0 ] && [ "$docs" -eq "$files" ] && [ "$DOCS_SKIP" -gt 0 ] && [ "$lines" -le "$DOCS_SKIP" ]; then
               decision=skip reason="docs-only diff of $lines lines (at most $DOCS_SKIP)"
             elif [ "$risky" -eq 0 ] && [ "$design" -eq 0 ] && [ "$SKIP_UNDER" -gt 0 ] && [ "$lines" -le "$SKIP_UNDER" ]; then
@@ -534,16 +545,6 @@ jobs:
             model=$(model_of "$family")
           fi
 
-          # arete-check's gate: a risky path or a governing document at any
-          # size. The review's own skips -- size, follow-up, cap -- are not
-          # this gate's; only a reason for no review at all stops it.
-          arete=false arete_reason="no risky path or governing document in the diff"
-          if [ "$risky" -gt 0 ] || [ "$design" -gt 0 ]; then
-            arete=true arete_reason="$risky risky path(s), $design governing document(s)"
-          fi
-          case " $LABELS " in *" review:skip "*) arete=false arete_reason="review:skip label" ;; esac
-          if [ "$AUTHOR" = "dependabot[bot]" ]; then arete=false arete_reason="Dependabot pull request"; fi
-
           {
             echo "decision=$decision"
             echo "reason=$reason"
@@ -551,8 +552,6 @@ jobs:
             echo "family=$family"
             echo "coders=${coders:-none named}"
             echo "family-why=$family_why"
-            echo "arete=$arete"
-            echo "arete-reason=$arete_reason"
             echo "effort-arg=$effort_arg"
             echo "lines=$lines"
             echo "files=$files"
@@ -561,7 +560,7 @@ jobs:
             echo "classes=lock=$lock design=$design docs=$docs risky=$risky code=$code"
           } >> "$GITHUB_OUTPUT"
           echo "::notice::review triage: $decision ($reason)"
-          echo "::notice::reviewer family: $family on $model ($family_why); arete-check: $arete ($arete_reason)"
+          echo "::notice::reviewer family: $family on $model ($family_why)"
 
       # Without this the action fails on every pull request in a repository
       # where the secret has not been set yet, which reads as a broken build
@@ -580,14 +579,10 @@ jobs:
 
       # How full the plan's rate windows are, from the endpoint the Claude
       # Code status line reads. Unknown is not full: a failed probe lets the
-      # review run and says so in the summary. Probed when either the review
-      # or arete-check would otherwise run.
+      # review run and says so in the summary.
       - name: Probe the plan budget
         id: budget
-        if: >-
-          steps.tok.outputs.present == 'true' && (
-            (steps.triage.outputs.decision != 'skip' && steps.seen.outputs.cache-hit != 'true') ||
-            (inputs.seed-home && steps.triage.outputs.arete == 'true' && steps.arete-seen.outputs.cache-hit != 'true'))
+        if: steps.triage.outputs.decision != 'skip' && steps.seen.outputs.cache-hit != 'true' && steps.tok.outputs.present == 'true'
         env:
           TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           PAUSE_AT: ${{ inputs.budget-pause-at }}
@@ -610,9 +605,9 @@ jobs:
             echo "pause=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # The switches the steps below read -- `run` for the review, `maxims`
-      # and `arete` for the other checks, `home` for the setup any of them
-      # needs -- and the decision written where a human looks for it.
+      # The switches the steps below read -- `run` for the review and the
+      # setup, `checks` for the two checks beside it -- and the decision
+      # written where a human looks for it.
       - name: Decide which checks run
         id: gate
         env:
@@ -623,9 +618,6 @@ jobs:
           FAMILY: ${{ steps.triage.outputs.family }}
           CODERS: ${{ steps.triage.outputs.coders }}
           FAMILY_WHY: ${{ steps.triage.outputs.family-why }}
-          WANT_ARETE: ${{ steps.triage.outputs.arete }}
-          ARETE_REASON: ${{ steps.triage.outputs.arete-reason }}
-          ARETE_SEEN: ${{ steps.arete-seen.outputs.cache-hit }}
           SEED_HOME: ${{ inputs.seed-home }}
           LINES: ${{ steps.triage.outputs.lines }}
           FILES: ${{ steps.triage.outputs.files }}
@@ -643,30 +635,20 @@ jobs:
           elif [ "$TOKEN_PRESENT" != true ]; then run=false outcome=skip why="CLAUDE_CODE_OAUTH_TOKEN is not set"
           elif [ "$PAUSE" = true ]; then run=false outcome=skip why="plan usage at $USED%"
           fi
-          maxims=$run maxims_why="runs with the review"
-          [ "$run" = true ] || maxims_why="the review does not run"
-          arete=$WANT_ARETE arete_why=$ARETE_REASON
-          if [ "$WANT_ARETE" != true ]; then :
-          elif [ "$ARETE_SEEN" = true ]; then arete=false arete_why="this content was already assessed (fingerprint)"
-          elif [ "$TOKEN_PRESENT" != true ]; then arete=false arete_why="CLAUDE_CODE_OAUTH_TOKEN is not set"
-          elif [ "$PAUSE" = true ]; then arete=false arete_why="plan usage at $USED%"
-          fi
-          # The skills live in the seeded home; without it there is nothing
-          # to run them from.
+          # The other two checks run whenever the review does, from skills
+          # that live in the seeded home; without it there is nothing to run
+          # them from.
+          checks=$run checks_why="run with the review"
+          [ "$run" = true ] || checks_why="the review does not run"
           if [ "$SEED_HOME" != true ]; then
-            if [ "$maxims" = true ] || [ "$arete" = true ]; then
+            if [ "$run" = true ]; then
               echo "::notice::seed-home is false: the review runs its generic brief; maxims-check and arete-check skip"
             fi
-            maxims=false maxims_why="seed-home is false: no skills to run"
-            arete=false arete_why="seed-home is false: no skills to run"
+            checks=false checks_why="seed-home is false: no skills to run"
           fi
-          home=false
-          if [ "$run" = true ] || [ "$arete" = true ]; then home=true; fi
           {
             echo "run=$run"
-            echo "maxims=$maxims"
-            echo "arete=$arete"
-            echo "home=$home"
+            echo "checks=$checks"
           } >> "$GITHUB_OUTPUT"
           {
             echo "### Claude review triage: $outcome"
@@ -677,8 +659,7 @@ jobs:
             echo "| tier | $DECISION ($REASON) |"
             echo "| model | ${MODEL:-} ${EFFORT:-} |"
             echo "| reviewer family | $FAMILY: $FAMILY_WHY (coders: $CODERS) |"
-            echo "| maxims-check | $maxims ($maxims_why) |"
-            echo "| arete-check | $arete ($arete_why) |"
+            echo "| maxims-check, arete-check | $checks ($checks_why) |"
             echo "| diff | $LINES lines in $FILES files; $CLASSES |"
             echo "| reviews so far | $REVIEWS |"
             echo "| plan usage | $usage |"
@@ -694,7 +675,7 @@ jobs:
       # (mark-brannan/.github#18, README "Nothing here is ever pinned"). Don't pin this.
       - name: Seed $HOME with Claude config from dotfiles
         id: claude-config
-        if: steps.gate.outputs.home == 'true' && inputs.seed-home
+        if: steps.gate.outputs.run == 'true' && inputs.seed-home
         uses: mark-brannan/dotfiles/.github/actions/claude-config@main
 
       # Verified against the action's `complete` output, not its exit code
@@ -704,7 +685,7 @@ jobs:
       # below claims no more than that.
       - name: Verify the seed
         id: seed
-        if: steps.gate.outputs.home == 'true'
+        if: steps.gate.outputs.run == 'true'
         env:
           SEED_HOME: ${{ inputs.seed-home }}
           SEED_COMPLETE: ${{ steps.claude-config.outputs.complete }}
@@ -732,7 +713,7 @@ jobs:
       # Claude Code refuses to add a marketplace whose source differs from
       # the one settings declares for that name. Restate the seeded entry as
       # the same git URL the action adds, so the two agree.
-      - if: steps.gate.outputs.home == 'true' && inputs.seed-home
+      - if: steps.gate.outputs.run == 'true' && inputs.seed-home
         name: Match the seeded languette marketplace to the action's URL
         run: |
           s="$HOME/.claude/settings.json"
@@ -954,9 +935,12 @@ jobs:
           EXEC: ${{ steps.review.outputs.execution_file }}
           MODEL: ${{ steps.triage.outputs.model }}
           WHAT: claude-review
+          TIER: ${{ steps.triage.outputs.decision }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR: ${{ github.event.pull_request.number }}
         run: |
           jq -c --arg what "$WHAT" --arg model "$MODEL" --arg repo "$GITHUB_REPOSITORY" --argjson pr "$PR" \
+            --arg sha "$HEAD_SHA" --arg tier "$TIER" \
             "$COST_ROW" "$EXEC" | tee -a headless-run.jsonl > .cost-row.json
           { echo "### Headless run cost: $WHAT"; echo '```json'; cat .cost-row.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
@@ -998,7 +982,7 @@ jobs:
       # read-only but for one file it writes its table to, which the next
       # step moves into the job summary. Runs whether or not the review
       # landed: the two are independent readings of the same diff.
-      - if: "!cancelled() && steps.gate.outputs.maxims == 'true'"
+      - if: "!cancelled() && steps.gate.outputs.checks == 'true'"
         id: maxims
         uses: anthropics/claude-code-action@db77d4d3c98f3f6380e7cd45ffba2342a3dbde3c # v1.0.254
         with:
@@ -1028,17 +1012,20 @@ jobs:
             --model claude-sonnet-5-5 --effort medium
             --allowedTools "Skill,Read,Glob,Grep,Read(~/.claude/skills/**),Bash(gh pr diff:*),Bash(gh pr view:*),Write(.claude-maxims.md)"
 
-      - if: always() && steps.gate.outputs.maxims == 'true' && steps.maxims.outputs.execution_file != ''
+      - if: always() && steps.gate.outputs.checks == 'true' && steps.maxims.outputs.execution_file != ''
         name: Put the maxims table in the job summary and record its cost
         env:
           EXEC: ${{ steps.maxims.outputs.execution_file }}
           MODEL: claude-sonnet-5-5
           WHAT: claude-maxims
+          TIER: ${{ steps.triage.outputs.decision }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           OUT: .claude-maxims.md
           TITLE: maxims-check
           PR: ${{ github.event.pull_request.number }}
         run: |
           jq -c --arg what "$WHAT" --arg model "$MODEL" --arg repo "$GITHUB_REPOSITORY" --argjson pr "$PR" \
+            --arg sha "$HEAD_SHA" --arg tier "$TIER" \
             "$COST_ROW" "$EXEC" | tee -a headless-run.jsonl > .cost-row.json
           # The file the check wrote; its final message when it wrote none.
           [ -s "$OUT" ] || jq -r '[.[] | select(.type == "result")] | last | .result // empty' "$EXEC" > "$OUT"
@@ -1054,7 +1041,7 @@ jobs:
       # headless and inline like maxims-check. Its brief goes to the job
       # summary, not the pull request, so the bot's comments there stay one
       # per review for the cap and the "review landed" check.
-      - if: "!cancelled() && steps.gate.outputs.arete == 'true'"
+      - if: "!cancelled() && steps.gate.outputs.checks == 'true'"
         id: arete
         uses: anthropics/claude-code-action@db77d4d3c98f3f6380e7cd45ffba2342a3dbde3c # v1.0.254
         with:
@@ -1085,18 +1072,20 @@ jobs:
             --model claude-sonnet-5-5 --effort medium
             --allowedTools "Skill,Read,Glob,Grep,Read(~/.claude/skills/**),Bash(gh pr diff:*),Bash(gh pr view:*),Write(.claude-arete.md)"
 
-      - if: always() && steps.gate.outputs.arete == 'true' && steps.arete.outputs.execution_file != ''
+      - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
         name: Put the arete brief in the job summary and record its cost
-        id: arete-out
         env:
           EXEC: ${{ steps.arete.outputs.execution_file }}
           MODEL: claude-sonnet-5-5
           WHAT: claude-arete
+          TIER: ${{ steps.triage.outputs.decision }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           OUT: .claude-arete.md
           TITLE: arete-check
           PR: ${{ github.event.pull_request.number }}
         run: |
           jq -c --arg what "$WHAT" --arg model "$MODEL" --arg repo "$GITHUB_REPOSITORY" --argjson pr "$PR" \
+            --arg sha "$HEAD_SHA" --arg tier "$TIER" \
             "$COST_ROW" "$EXEC" | tee -a headless-run.jsonl > .cost-row.json
           # The file the check wrote; its final message when it wrote none.
           [ -s "$OUT" ] || jq -r '[.[] | select(.type == "result")] | last | .result // empty' "$EXEC" > "$OUT"
@@ -1107,19 +1096,6 @@ jobs:
             echo
             echo "### Headless run cost: $WHAT"; echo '```json'; cat .cost-row.json; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "brief=$([ -s "$OUT" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-
-      # The content is remembered as assessed only once a brief exists, the
-      # same rule the review's fingerprint keeps.
-      - if: always() && steps.arete-out.outputs.brief == 'true'
-        name: Remember that this content was assessed
-        run: echo "${{ steps.fp.outputs.id }}" > .claude-arete
-
-      - if: always() && steps.arete-out.outputs.brief == 'true'
-        uses: actions/cache/save@v6
-        with:
-          path: .claude-arete
-          key: claude-arete-pr${{ github.event.pull_request.number }}-${{ steps.fp.outputs.id }}
 
       - if: always() && hashFiles('headless-run.jsonl') != ''
         uses: actions/upload-artifact@v7.0.2

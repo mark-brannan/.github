@@ -138,7 +138,10 @@ def gh_json(*args, soft=False):
 
 
 def parse_log(text):
-    """The run's model, cost, turns, wall time, tier and effort, from one job log."""
+    """The run's model, cost, turns, wall time, tier and effort, from one job log.
+    The job runs the review first and then the checks beside it, each its own
+    action invocation with its own init, result and claude_args, so only the
+    first of each is the review's."""
     lines = [STAMP.sub("", ln) for ln in text.splitlines()]
     out = {"model": "", "cost": None, "turns": None, "ms": None, "tier": "", "why": "", "effort": "",
            "paths": ""}
@@ -154,8 +157,8 @@ def parse_log(text):
             except ValueError:
                 msg = None
             if isinstance(msg, dict) and msg.get("type") == "system" and msg.get("subtype") == "init":
-                out["model"] = msg.get("model") or out["model"]
-            elif isinstance(msg, dict) and msg.get("type") == "result":
+                out["model"] = out["model"] or msg.get("model") or ""
+            elif isinstance(msg, dict) and msg.get("type") == "result" and out["cost"] is None:
                 out["cost"] = msg.get("total_cost_usd")
                 out["turns"] = msg.get("num_turns")
                 out["ms"] = msg.get("duration_ms")
@@ -165,7 +168,7 @@ def parse_log(text):
         if m:
             out["tier"], out["why"] = m.group(1), m.group(2)
         m = EFFORT.search(ln)
-        if m:
+        if m and not out["effort"]:
             out["effort"] = m.group(1)
         m = CLASSES.search(ln)
         if m:
