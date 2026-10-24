@@ -86,7 +86,8 @@ CAP = 1000  # GitHub lists at most this many runs for a filtered query (#73)
 FLOOR = 2000  # calls --pace leaves in the hourly budget for every other session
 STAMP = re.compile(r"^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ?")
 TRIAGE = re.compile(r"^##\[notice\]review triage: (skip|default|deep) \((.*)\)\s*$")
-EFFORT = re.compile(r"^\s+claude_args: .*--effort\s+([a-z]+)")
+ARGS = re.compile(r"^\s+claude_args: ")
+EFFORT = re.compile(r"--effort\s+([a-z]+)")
 CLASSES = re.compile(r"^\s+CLASSES: ((?:[a-z]+=\d+ ?)+)$")
 FIXED = re.compile(r"\b(fixed|done|addressed|applied|resolved in|in [0-9a-f]{7,40})\b", re.I)
 DECLINED = re.compile(r"\b(no|not|won't|wontfix|disagree|by design|intended|intentional|keep(ing)?|kept|"
@@ -146,6 +147,7 @@ def parse_log(text):
     out = {"model": "", "cost": None, "turns": None, "ms": None, "tier": "", "why": "", "effort": "",
            "paths": ""}
     i = 0
+    seen_args = False
     while i < len(lines):
         ln = lines[i]
         if ln == "{":
@@ -167,9 +169,13 @@ def parse_log(text):
         m = TRIAGE.search(ln)
         if m:
             out["tier"], out["why"] = m.group(1), m.group(2)
-        m = EFFORT.search(ln)
-        if m and not out["effort"]:
-            out["effort"] = m.group(1)
+        # The first claude_args line is the review's, whatever it holds: a
+        # default-tier review passes no --effort, and a later check's must
+        # not stand in for it.
+        if ARGS.search(ln) and not seen_args:
+            seen_args = True
+            m = EFFORT.search(ln)
+            out["effort"] = m.group(1) if m else ""
         m = CLASSES.search(ln)
         if m:
             out["paths"] = "+".join(k for k, v in (kv.split("=") for kv in m.group(1).split()) if v != "0") or "none"

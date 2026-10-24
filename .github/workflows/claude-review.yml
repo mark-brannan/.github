@@ -276,11 +276,13 @@ jobs:
     env:
       CLAUDE_STOP_COMMIT: off
       # What the review needs whatever the caller adds: the skill, its
-      # comment tools and the two scripts it runs from the seeded home.
+      # comment tools, the two scripts it runs from the seeded home, and the
+      # read-only git it uses to hold the PR to the base's instructions
+      # rather than the head's.
       # `allowed-tools` (the npm grants unless the caller says otherwise)
       # extends this, the way `allowed-bots` extends the shared bots; what
       # executes the PR's own code stays the caller's choice.
-      REVIEW_TOOLS: Skill,mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(python3 ~/.claude/lib/critical_review.py reviewer:*),Bash(~/.claude/bin/pr-blockers:*)
+      REVIEW_TOOLS: Skill,mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(python3 ~/.claude/lib/critical_review.py reviewer:*),Bash(~/.claude/bin/pr-blockers:*),Bash(git fetch origin:*),Bash(git show origin/:*),Bash(git diff origin/:*)
       # One cost row from an execution file, for each check's record step.
       COST_ROW: >-
         [.[] | select(.type == "result")] | last // {} | {ts: (now | todate), what: $what, repo: $repo, pr: $pr,
@@ -1013,6 +1015,11 @@ jobs:
             --model claude-sonnet-5-5 --effort medium
             --allowedTools "Skill,Read,Glob,Grep,Read(~/.claude/skills/**),Bash(gh pr diff:*),Bash(gh pr view:*),Write(.claude-maxims.md)"
 
+      # This step and arete-check's are the same body but for their env: a
+      # declared DRY break. A reusable workflow runs in the caller's
+      # checkout, so a shared script here would not be there to call, and a
+      # composite action for twenty lines is more to keep than the copy.
+      # Change one, change both.
       - if: always() && steps.gate.outputs.checks == 'true' && steps.maxims.outputs.execution_file != ''
         name: Put the maxims table in the job summary and record its cost
         env:
