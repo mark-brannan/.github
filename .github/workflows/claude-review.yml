@@ -68,7 +68,8 @@ name: Claude PR Review
 #            no recorded reviewed head to compare never skips).
 #   default  the caller's `model`, no effort flag: what every PR got before.
 #   deep     a `review:deep` label; a risky path (anything under .github/,
-#            actions, Mergify, CODEOWNERS, hooks, settings, Dockerfiles); a diff over
+#            actions, Mergify, CODEOWNERS, hooks, settings, Dockerfiles, plus
+#            any glob the caller adds in `risky-paths`); a diff over
 #            `deep-over-lines`. Runs on `deep-model` with `--effort deep-effort`.
 #            Escalation is paid once per pull request: once any review of it
 #            is on record (a recorded fingerprint, or any comment from the
@@ -179,6 +180,11 @@ on:
         required: false
         type: number
         default: 4
+      risky-paths:
+        description: Extra risky paths, one shell glob per line (or space-separated), matched against each changed path from the repo root like `hooks/*` or `settings.*.json`; added to the built-in list, never replacing it. For a repo whose hooks and settings sit at the root rather than under .claude/.
+        required: false
+        type: string
+        default: ''
       followup-risky-only:
         description: Once the bot has reviewed a pull request, a later push is reviewed only if its changes since the last reviewed head touch a risky path's own lines; the review:deep label still runs; false reviews every follow-up
         required: false
@@ -328,6 +334,7 @@ jobs:
           PRIOR: ${{ steps.seen.outputs.cache-matched-key }}
           MAX_REVIEWS: ${{ inputs.max-reviews }}
           FOLLOWUP_RISKY_ONLY: ${{ inputs.followup-risky-only }}
+          RISKY_PATHS: ${{ inputs.risky-paths }}
           LAST: ${{ steps.fp.outputs.last }}
         run: |
           set -euo pipefail
@@ -343,13 +350,23 @@ jobs:
           reviews=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
                       --jq '.[] | select(.user.login == "claude[bot]") | .id' | wc -l) || reviews=unknown
           mb=$(git merge-base "origin/$BASE" HEAD)
-          # The risky class, one list for the tier and the follow-up rule.
+          # The risky class, one list for the tier and the follow-up rule:
+          # the built-in globs, then the caller's `risky-paths`, each tried
+          # as a shell pattern against the path from the repo root.
           risky_path() {
             case "$1" in
               .github/*|action.yml|*/action.yml|.mergify.yml|CODEOWNERS|\
               .claude/hooks/*|.claude/settings.json|.claude/settings.*.json|\
               Dockerfile|*/Dockerfile|Dockerfile.*|*/Dockerfile.*) return 0 ;;
             esac
+            # `local -` restores the shell options on return; -f stops the
+            # unquoted globs expanding against the checkout's own files.
+            local - g
+            set -f
+            for g in ${RISKY_PATHS:-}; do
+              # shellcheck disable=SC2254  # unquoted on purpose: $g is the pattern
+              case "$1" in $g) return 0 ;; esac
+            done
             return 1
           }
           files=0 lock=0 design=0 docs=0 risky=0 code=0 lines=0
@@ -417,7 +434,7 @@ jobs:
             elif [ "$risky" -eq 0 ] && [ "$SKIP_UNDER" -gt 0 ] && [ "$lines" -le "$SKIP_UNDER" ]; then
               decision=skip reason="$lines changed lines (at most $SKIP_UNDER), no risky path"
             elif [ "$risky" -gt 0 ]; then
-              decision=deep reason="$risky risky path(s): anything under .github/, actions, Mergify, CODEOWNERS, hooks, settings or Dockerfiles"
+              decision=deep reason="$risky risky path(s): anything under .github/, actions, Mergify, CODEOWNERS, hooks, settings, Dockerfiles${RISKY_PATHS:+ or the caller's risky-paths}"
             elif [ "$lines" -gt "$DEEP_OVER" ]; then
               decision=deep reason="$lines changed lines (more than $DEEP_OVER)"
             fi
