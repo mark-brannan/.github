@@ -35,7 +35,9 @@ name: Claude PR Review
 #
 # Each check leaves one cost row, appended to headless-run.jsonl and uploaded
 # as the `headless-run` artifact (with the maxims table and arete brief as
-# .claude-maxims.md and .claude-arete.md), with the same rows in the job summary. The
+# .claude-maxims.md and .claude-arete.md), with the same rows in the job summary
+# and a "what denied its calls" section per check naming each refused tool
+# call or hook. The
 # shape is stable, for readers that gather the artifacts across repositories;
 # a new field is added, never renamed or dropped:
 #
@@ -1093,11 +1095,10 @@ jobs:
             echo "### Headless run cost: $WHAT"; echo '```json'; cat .cost-row.json; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Which tool call or hook refused what (mark-brannan/.github#97): the
-      # action's log keeps only permission_denials_count, so read the
-      # execution file for each refused call, the rule's or hook's reason,
-      # and any hook output that denied or blocked. Printed to the log and
-      # the job summary; it changes nothing. The filter is DENIALS, in env:.
+      # Which tool call or hook refused what (mark-brannan/.github#97); the
+      # filter is DENIALS, in env:. Changes nothing. Same body as arete-check's
+      # denial step but for its env, a DRY break declared like the summary
+      # steps': change one, change both.
       - if: always() && steps.gate.outputs.checks == 'true' && steps.maxims.outputs.execution_file != ''
         name: Say what denied maxims-check's calls
         env:
@@ -1175,11 +1176,10 @@ jobs:
             echo "### Headless run cost: $WHAT"; echo '```json'; cat .cost-row.json; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Which tool call or hook refused what (mark-brannan/.github#97): the
-      # action's log keeps only permission_denials_count, so read the
-      # execution file for each refused call, the rule's or hook's reason,
-      # and any hook output that denied or blocked. Printed to the log and
-      # the job summary; it changes nothing. The filter is DENIALS, in env:.
+      # Which tool call or hook refused what (mark-brannan/.github#97); the
+      # filter is DENIALS, in env:. Changes nothing. Same body as maxims-check's
+      # denial step but for its env, a DRY break declared like the summary
+      # steps': change one, change both.
       - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
         name: Say what denied arete-check's calls
         env:
