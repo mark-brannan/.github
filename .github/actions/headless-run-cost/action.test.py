@@ -85,6 +85,11 @@ class Test(unittest.TestCase):
         self.assertEqual(r.row["outcome"], "no result")
         self.assertEqual((r.row["model"], r.row["issue"]), ("m", 7))
 
+    def test_filter_failure_keeps_fields_and_model(self):
+        r = Run(self, [1, OK], MODEL="m", FIELDS='{"tier":"deep"}')
+        self.assertEqual(r.row["outcome"], "no result")
+        self.assertEqual((r.row["model"], r.row["tier"]), ("m", "deep"))
+
     def test_bad_fields_and_pr_degrade(self):
         r = Run(self, [OK], FIELDS="not json", PR="abc")
         self.assertEqual((r.row["outcome"], r.row["pr"]), ("success", None))

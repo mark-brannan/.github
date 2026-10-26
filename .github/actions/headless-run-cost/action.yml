@@ -70,9 +70,11 @@ runs:
           --argjson pr "$PR" --argjson fields "$FIELDS" \
           -f "$GITHUB_ACTION_PATH/cost-row.jq" <<<"$input")
         if [ -z "$row" ]; then
-          row=$(jq -cn --arg what "$WHAT" --arg repo "$GITHUB_REPOSITORY" --argjson pr "$PR" \
-            '{ts: (now | todate), what: $what, repo: $repo, pr: $pr, model: null,
-              total_cost_usd: null, usage: null, outcome: "no result"}')
+          row=$(jq -cn --arg what "$WHAT" --arg model "$MODEL" --arg repo "$GITHUB_REPOSITORY" \
+            --argjson pr "$PR" --argjson fields "$FIELDS" \
+            '{ts: (now | todate), what: $what, repo: $repo, pr: $pr,
+              model: (if $model != "" then $model else null end),
+              total_cost_usd: null, usage: null, outcome: "no result"} + $fields')
         fi
         echo "$row" >> "$FILE"
         if [ "$SUMMARY" = true ]; then

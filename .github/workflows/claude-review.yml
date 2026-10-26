@@ -1050,11 +1050,7 @@ jobs:
             --model claude-sonnet-5-5 --effort medium
             --allowedTools "Skill,Read,Glob,Grep,Read(~/.claude/skills/**),Bash(gh pr diff:*),Bash(gh pr view:*),Write(.claude-maxims.md)"
 
-      # The cost row comes from the shared headless-run-cost action. The
-      # summary step after it and arete-check's are the same body but for
-      # their env: a declared DRY break. A reusable workflow runs in the
-      # caller's checkout, so a shared script here would not be there to
-      # call. Change one, change both.
+      # The cost row comes from the shared headless-run-cost action.
       - if: always() && steps.gate.outputs.checks == 'true' && steps.maxims.outputs.execution_file != ''
         name: Record the cost of maxims-check
         id: maxims-cost
@@ -1067,8 +1063,12 @@ jobs:
           fields: '{"head_sha":"${{ github.event.pull_request.head.sha }}","tier":"${{ steps.triage.outputs.decision }}"}'
           summary: 'false'
 
+      # This summary step and arete-check's are the same body but for their
+      # env: a declared DRY break. A reusable workflow runs in the caller's
+      # checkout, so a shared script here would not be there to call. Change
+      # one, change both.
       - if: always() && steps.gate.outputs.checks == 'true' && steps.maxims.outputs.execution_file != ''
-        name: Put the maxims table in the job summary and record its cost
+        name: Put the maxims table in the job summary
         env:
           EXEC: ${{ steps.maxims.outputs.execution_file }}
           WHAT: claude-maxims
@@ -1155,7 +1155,7 @@ jobs:
           summary: 'false'
 
       - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
-        name: Put the arete brief in the job summary and record its cost
+        name: Put the arete brief in the job summary
         env:
           EXEC: ${{ steps.arete.outputs.execution_file }}
           WHAT: claude-arete
