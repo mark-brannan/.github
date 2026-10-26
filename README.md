@@ -16,6 +16,7 @@ workflows; the substance lives here, once.
 | `.github/workflows/prose-budget.yml` | `uses: mark-brannan/.github/.github/workflows/prose-budget.yml@main`; the engine is `prose-budget` in `mark-brannan/claude` (`bin/`), the config is the repository's `docs/budgets.json` or `.prose-budgets.json` |
 | `.github/scripts/review_metrics.py` | run by hand, `python3 .github/scripts/review_metrics.py --days 30` with `gh` signed in; what the `claude-review.yml` reviews cost, per run, model and tier, and what became of each comment they left (fixed, declined, ignored, judgment); `--raw` keeps every comment in full, and `--from` re-reads that file with no network, so a reclassification never refetches |
 | `.github/actions/npm-test-prose-fallback` | `uses: mark-brannan/.github/.github/actions/npm-test-prose-fallback@main` from an `npm test` step, on a runner with no `prose-budget` engine; pair with the `prose-budget` job above, which is the real gate |
+| `.github/actions/headless-run-cost` | `uses: mark-brannan/.github/.github/actions/headless-run-cost@main` after a headless Claude step; appends the run's cost row to `headless-run.jsonl`, which the caller uploads as the `headless-run` artifact |
 
 Each file's header comment shows the calling snippet. A documentation gate
 fans into `ci-gate` like any other job:
