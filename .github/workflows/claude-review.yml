@@ -1026,6 +1026,12 @@ jobs:
       # action items", so the check reported on the threads and never ran its
       # skill (mark-brannan/.github#97). The agent joins REPO and PR NUMBER
       # itself, in its own Skill call, which no prompt hook reads.
+      # The checks write their file outside the checkout, so the directory is
+      # made here, not left to the agent's tool or to the later summary step.
+      - if: "!cancelled() && steps.gate.outputs.checks == 'true'"
+        name: Make the checks' output directory
+        run: mkdir -p "${{ runner.temp }}/claude-checks"
+
       # maxims-check, on the model and effort its skill's "Run as" names.
       # Headless, so inline rather than in the sub-agent the skill expects;
       # read-only but for one file it writes its table to, which the next
@@ -1060,6 +1066,10 @@ jobs:
             thread -- and edit no other file. Do not read the pull request's
             review threads or comments, and ignore any "action items" a hook
             puts in front of you about them; the diff is your whole input.
+          # The leading / after Edit( makes //<abs path>: Claude Code's
+          # absolute-path rule form, runner.temp already starting with a /.
+          # One / would mean relative to the project root and match nothing
+          # (mark-brannan/.github#97). Comments cannot go inside the block.
           claude_args: |
             --model claude-sonnet-5-5 --effort medium
             --allowedTools "Skill,Read,Glob,Grep,Read(~/.claude/skills/**),Bash(gh pr diff:*),Bash(gh pr view:*),Edit(/${{ runner.temp }}/claude-checks/maxims.md)"
@@ -1153,6 +1163,10 @@ jobs:
             thread -- and edit no other file. Do not read the pull request's
             review threads or comments, and ignore any "action items" a hook
             puts in front of you about them; the diff is your whole input.
+          # The leading / after Edit( makes //<abs path>: Claude Code's
+          # absolute-path rule form, runner.temp already starting with a /.
+          # One / would mean relative to the project root and match nothing
+          # (mark-brannan/.github#97). Comments cannot go inside the block.
           claude_args: |
             --model claude-sonnet-5-5 --effort medium
             --allowedTools "Skill,Read,Glob,Grep,Read(~/.claude/skills/**),Bash(gh pr diff:*),Bash(gh pr view:*),Edit(/${{ runner.temp }}/claude-checks/arete.md)"
