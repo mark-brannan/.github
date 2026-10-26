@@ -1062,7 +1062,7 @@ jobs:
             puts in front of you about them; the diff is your whole input.
           claude_args: |
             --model claude-sonnet-5-5 --effort medium
-            --allowedTools "Skill,Read,Glob,Grep,Read(~/.claude/skills/**),Bash(gh pr diff:*),Bash(gh pr view:*),Write(/${{ runner.temp }}/claude-checks/maxims.md)"
+            --allowedTools "Skill,Read,Glob,Grep,Read(~/.claude/skills/**),Bash(gh pr diff:*),Bash(gh pr view:*),Edit(/${{ runner.temp }}/claude-checks/maxims.md)"
 
       # This step and arete-check's are the same body but for their env: a
       # declared DRY break. A reusable workflow runs in the caller's
@@ -1155,7 +1155,7 @@ jobs:
             puts in front of you about them; the diff is your whole input.
           claude_args: |
             --model claude-sonnet-5-5 --effort medium
-            --allowedTools "Skill,Read,Glob,Grep,Read(~/.claude/skills/**),Bash(gh pr diff:*),Bash(gh pr view:*),Write(/${{ runner.temp }}/claude-checks/arete.md)"
+            --allowedTools "Skill,Read,Glob,Grep,Read(~/.claude/skills/**),Bash(gh pr diff:*),Bash(gh pr view:*),Edit(/${{ runner.temp }}/claude-checks/arete.md)"
 
       - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
         name: Put the arete brief in the job summary and record its cost
