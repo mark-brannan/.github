@@ -60,8 +60,8 @@ runs:
       run: |
         # Never fails the job: every bad input degrades to an empty one.
         set +e
-        jq -e 'type == "object"' <<<"$FIELDS" >/dev/null 2>&1 || FIELDS='{}'
-        [[ "$PR" =~ ^[0-9]+$ ]] || PR=null
+        jq -e 'type == "object"' <<<"$FIELDS" >/dev/null 2>&1 || { echo "::warning::headless-run-cost: fields is not a JSON object, using {}: $FIELDS"; FIELDS='{}'; }
+        [[ "$PR" =~ ^[0-9]+$ ]] || { [ -z "$PR" ] || echo "::warning::headless-run-cost: pr is not a number, using null: $PR"; PR=null; }
         input='[]'
         if [ -n "$EXEC" ] && [ -f "$EXEC" ] && jq -e 'type == "array"' "$EXEC" >/dev/null 2>&1; then
           input=$(cat "$EXEC")

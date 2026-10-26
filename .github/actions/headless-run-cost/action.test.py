@@ -93,6 +93,11 @@ class Test(unittest.TestCase):
     def test_bad_fields_and_pr_degrade(self):
         r = Run(self, [OK], FIELDS="not json", PR="abc")
         self.assertEqual((r.row["outcome"], r.row["pr"]), ("success", None))
+        self.assertIn("::warning::headless-run-cost: fields is not a JSON object", r.proc.stdout)
+        self.assertIn("::warning::headless-run-cost: pr is not a number", r.proc.stdout)
+
+    def test_empty_pr_is_silent(self):
+        self.assertNotIn("::warning", Run(self, [OK], PR="").proc.stdout)
 
     def test_summary_off(self):
         self.assertEqual(Run(self, [OK], SUMMARY="false").summary, "")
