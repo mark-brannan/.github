@@ -1050,11 +1050,11 @@ jobs:
             --model claude-sonnet-5-5 --effort medium
             --allowedTools "Skill,Read,Glob,Grep,Read(~/.claude/skills/**),Bash(gh pr diff:*),Bash(gh pr view:*),Write(.claude-maxims.md)"
 
-      # This step and arete-check's are the same body but for their env: a
-      # declared DRY break. A reusable workflow runs in the caller's
-      # checkout, so a shared script here would not be there to call, and a
-      # composite action for twenty lines is more to keep than the copy.
-      # Change one, change both.
+      # The cost row comes from the shared headless-run-cost action. The
+      # summary step after it and arete-check's are the same body but for
+      # their env: a declared DRY break. A reusable workflow runs in the
+      # caller's checkout, so a shared script here would not be there to
+      # call. Change one, change both.
       - if: always() && steps.gate.outputs.checks == 'true' && steps.maxims.outputs.execution_file != ''
         name: Record the cost of maxims-check
         id: maxims-cost
