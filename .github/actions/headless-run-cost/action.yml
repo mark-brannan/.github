@@ -1,0 +1,85 @@
+name: headless-run-cost
+description: >
+  Writes the cost row for one headless Claude run: appends one JSON line to
+  headless-run.jsonl (the `headless-run` artifact that metrics-db --github in
+  mark-brannan/claude gathers across repos) and puts it in the job summary.
+  The caller uploads the file. A run with no usable execution file still gets
+  a row, with outcome "no result". This step never fails the job.
+  The row shape is stable: a new field is added, never renamed or dropped.
+
+inputs:
+  execution-file:
+    description: Path to the run's execution file; may be empty or missing
+    required: false
+    default: ''
+  what:
+    description: Which run this is (claude-review, claude-issue-trial, ...)
+    required: true
+  model:
+    description: Model of the run; default is the execution file's init message
+    required: false
+    default: ''
+  pr:
+    description: Pull request number, or empty for null
+    required: false
+    default: ''
+  fields:
+    description: JSON object merged into the row (head_sha, tier, issue, host, ...)
+    required: false
+    default: '{}'
+  file:
+    description: File the row is appended to
+    required: false
+    default: headless-run.jsonl
+  summary:
+    description: Append the row to the job summary
+    required: false
+    default: 'true'
+
+outputs:
+  outcome:
+    description: The run's outcome (success, error, error_max_turns, no result, ...)
+    value: ${{ steps.row.outputs.outcome }}
+  row:
+    description: The row, one line of JSON
+    value: ${{ steps.row.outputs.row }}
+
+runs:
+  using: composite
+  steps:
+    - id: row
+      shell: bash
+      env:
+        EXEC: ${{ inputs.execution-file }}
+        WHAT: ${{ inputs.what }}
+        MODEL: ${{ inputs.model }}
+        PR: ${{ inputs.pr }}
+        FIELDS: ${{ inputs.fields }}
+        FILE: ${{ inputs.file }}
+        SUMMARY: ${{ inputs.summary }}
+      run: |
+        # Never fails the job: every bad input degrades to an empty one.
+        set +e
+        jq -e 'type == "object"' <<<"$FIELDS" >/dev/null 2>&1 || FIELDS='{}'
+        [[ "$PR" =~ ^[0-9]+$ ]] || PR=null
+        input='[]'
+        if [ -n "$EXEC" ] && [ -f "$EXEC" ] && jq -e 'type == "array"' "$EXEC" >/dev/null 2>&1; then
+          input=$(cat "$EXEC")
+        fi
+        row=$(jq -c --arg what "$WHAT" --arg model "$MODEL" --arg repo "$GITHUB_REPOSITORY" \
+          --argjson pr "$PR" --argjson fields "$FIELDS" \
+          -f "$GITHUB_ACTION_PATH/cost-row.jq" <<<"$input")
+        if [ -z "$row" ]; then
+          row=$(jq -cn --arg what "$WHAT" --arg repo "$GITHUB_REPOSITORY" --argjson pr "$PR" \
+            '{ts: (now | todate), what: $what, repo: $repo, pr: $pr, model: null,
+              total_cost_usd: null, usage: null, outcome: "no result"}')
+        fi
+        echo "$row" >> "$FILE"
+        if [ "$SUMMARY" = true ]; then
+          { echo "### Headless run cost: $WHAT"; echo '```json'; echo "$row"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+        fi
+        {
+          echo "row=$row"
+          echo "outcome=$(jq -r .outcome <<<"$row")"
+        } >> "$GITHUB_OUTPUT"
+        exit 0

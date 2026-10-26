@@ -33,7 +33,7 @@ name: Claude PR Review
 # is measured rather than guessed, and a cheaper gate can be built on the
 # numbers later.
 #
-# Each check leaves one cost row, appended to headless-run.jsonl and uploaded
+# Each check leaves one cost row (the headless-run-cost action writes it), appended to headless-run.jsonl and uploaded
 # as the `headless-run` artifact (with the maxims table and arete brief as
 # .claude-maxims.md and .claude-arete.md), with the same rows in the job summary
 # and a "what denied its calls" section per check naming each refused tool
@@ -42,8 +42,9 @@ name: Claude PR Review
 # a new field is added, never renamed or dropped:
 #
 #   {"ts":"2026-10-24T09:12:03Z","what":"claude-maxims","repo":"mark-brannan/x",
-#    "pr":42,"head_sha":"4b45f6d...","model":"claude-sonnet-5-5","tier":"default",
-#    "total_cost_usd":0.35,"usage":{"input_tokens":...},"outcome":"success"}
+#    "pr":42,"model":"claude-sonnet-5-5","total_cost_usd":0.35,
+#    "usage":{"input_tokens":...},"outcome":"success","head_sha":"4b45f6d...",
+#    "tier":"default"}
 #
 #   what     claude-review, claude-maxims or claude-arete
 #   tier     triage's tier for the run (default or deep); the review's model
@@ -292,11 +293,6 @@ jobs:
       # extends this, the way `allowed-bots` extends the shared bots; what
       # executes the PR's own code stays the caller's choice.
       REVIEW_TOOLS: Skill,mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(python3 ~/.claude/lib/critical_review.py reviewer:*),Bash(~/.claude/bin/pr-blockers:*),Bash(git fetch origin:*),Bash(git show origin/:*),Bash(git diff origin/:*)
-      # One cost row from an execution file, for each check's record step.
-      COST_ROW: >-
-        [.[] | select(.type == "result")] | last // {} | {ts: (now | todate), what: $what, repo: $repo, pr: $pr,
-        head_sha: $sha, model: $model, tier: $tier, total_cost_usd, usage,
-        outcome: (if (.is_error // false) and .subtype == "success" then "error" else (.subtype // "no result") end)}
       # Every refused call in an execution file, for each check's denial step
       # (mark-brannan/.github#97): the tool error with its call, the
       # permission denials the result carries, and any hook that denied,
@@ -971,18 +967,13 @@ jobs:
       # writes the same execution file, so the next one overwrites it.
       - if: always() && steps.gate.outputs.run == 'true' && steps.review.outputs.execution_file != ''
         name: Record the cost of the review
-        env:
-          EXEC: ${{ steps.review.outputs.execution_file }}
-          MODEL: ${{ steps.triage.outputs.model }}
-          WHAT: claude-review
-          TIER: ${{ steps.triage.outputs.decision }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          jq -c --arg what "$WHAT" --arg model "$MODEL" --arg repo "$GITHUB_REPOSITORY" --argjson pr "$PR" \
-            --arg sha "$HEAD_SHA" --arg tier "$TIER" \
-            "$COST_ROW" "$EXEC" | tee -a headless-run.jsonl > .cost-row.json
-          { echo "### Headless run cost: $WHAT"; echo '```json'; cat .cost-row.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+        uses: mark-brannan/.github/.github/actions/headless-run-cost@main
+        with:
+          execution-file: ${{ steps.review.outputs.execution_file }}
+          what: claude-review
+          model: ${{ steps.triage.outputs.model }}
+          pr: ${{ github.event.pull_request.number }}
+          fields: '{"head_sha":"${{ github.event.pull_request.head.sha }}","tier":"${{ steps.triage.outputs.decision }}"}'
 
       - if: steps.gate.outputs.run == 'true'
         name: Confirm a review comment actually landed
@@ -1065,34 +1056,40 @@ jobs:
       # composite action for twenty lines is more to keep than the copy.
       # Change one, change both.
       - if: always() && steps.gate.outputs.checks == 'true' && steps.maxims.outputs.execution_file != ''
+        name: Record the cost of maxims-check
+        id: maxims-cost
+        uses: mark-brannan/.github/.github/actions/headless-run-cost@main
+        with:
+          execution-file: ${{ steps.maxims.outputs.execution_file }}
+          what: claude-maxims
+          model: claude-sonnet-5-5
+          pr: ${{ github.event.pull_request.number }}
+          fields: '{"head_sha":"${{ github.event.pull_request.head.sha }}","tier":"${{ steps.triage.outputs.decision }}"}'
+          summary: 'false'
+
+      - if: always() && steps.gate.outputs.checks == 'true' && steps.maxims.outputs.execution_file != ''
         name: Put the maxims table in the job summary and record its cost
         env:
           EXEC: ${{ steps.maxims.outputs.execution_file }}
-          MODEL: claude-sonnet-5-5
           WHAT: claude-maxims
-          TIER: ${{ steps.triage.outputs.decision }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           OUT: .claude-maxims.md
           TITLE: maxims-check
-          PR: ${{ github.event.pull_request.number }}
+          OUTCOME: ${{ steps.maxims-cost.outputs.outcome }}
+          ROW: ${{ steps.maxims-cost.outputs.row }}
         run: |
-          jq -c --arg what "$WHAT" --arg model "$MODEL" --arg repo "$GITHUB_REPOSITORY" --argjson pr "$PR" \
-            --arg sha "$HEAD_SHA" --arg tier "$TIER" \
-            "$COST_ROW" "$EXEC" | tee -a headless-run.jsonl > .cost-row.json
           # The file the check wrote; its final message when it wrote none
           # and the run succeeded. An error's text (a usage limit, a crash) is
           # never taken for the check's output.
-          outcome=$(jq -r .outcome .cost-row.json)
-          if [ ! -s "$OUT" ] && [ "$outcome" = success ]; then
+          if [ ! -s "$OUT" ] && [ "$OUTCOME" = success ]; then
             jq -r '[.[] | select(.type == "result")] | last | .result // empty' "$EXEC" > "$OUT"
           fi
-          [ -s "$OUT" ] || echo "_check produced no output (${outcome})_" > "$OUT"
+          [ -s "$OUT" ] || echo "_check produced no output (${OUTCOME})_" > "$OUT"
           {
             echo "### $TITLE"
             echo
             cat "$OUT"
             echo
-            echo "### Headless run cost: $WHAT"; echo '```json'; cat .cost-row.json; echo '```'
+            echo "### Headless run cost: $WHAT"; echo '```json'; echo "$ROW"; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Which tool call or hook refused what (mark-brannan/.github#97); the
@@ -1146,34 +1143,40 @@ jobs:
             --allowedTools "Skill,Read,Glob,Grep,Read(~/.claude/skills/**),Bash(gh pr diff:*),Bash(gh pr view:*),Write(.claude-arete.md)"
 
       - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
+        name: Record the cost of arete-check
+        id: arete-cost
+        uses: mark-brannan/.github/.github/actions/headless-run-cost@main
+        with:
+          execution-file: ${{ steps.arete.outputs.execution_file }}
+          what: claude-arete
+          model: claude-sonnet-5-5
+          pr: ${{ github.event.pull_request.number }}
+          fields: '{"head_sha":"${{ github.event.pull_request.head.sha }}","tier":"${{ steps.triage.outputs.decision }}"}'
+          summary: 'false'
+
+      - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
         name: Put the arete brief in the job summary and record its cost
         env:
           EXEC: ${{ steps.arete.outputs.execution_file }}
-          MODEL: claude-sonnet-5-5
           WHAT: claude-arete
-          TIER: ${{ steps.triage.outputs.decision }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           OUT: .claude-arete.md
           TITLE: arete-check
-          PR: ${{ github.event.pull_request.number }}
+          OUTCOME: ${{ steps.arete-cost.outputs.outcome }}
+          ROW: ${{ steps.arete-cost.outputs.row }}
         run: |
-          jq -c --arg what "$WHAT" --arg model "$MODEL" --arg repo "$GITHUB_REPOSITORY" --argjson pr "$PR" \
-            --arg sha "$HEAD_SHA" --arg tier "$TIER" \
-            "$COST_ROW" "$EXEC" | tee -a headless-run.jsonl > .cost-row.json
           # The file the check wrote; its final message when it wrote none
           # and the run succeeded. An error's text (a usage limit, a crash) is
           # never taken for the check's output.
-          outcome=$(jq -r .outcome .cost-row.json)
-          if [ ! -s "$OUT" ] && [ "$outcome" = success ]; then
+          if [ ! -s "$OUT" ] && [ "$OUTCOME" = success ]; then
             jq -r '[.[] | select(.type == "result")] | last | .result // empty' "$EXEC" > "$OUT"
           fi
-          [ -s "$OUT" ] || echo "_check produced no output (${outcome})_" > "$OUT"
+          [ -s "$OUT" ] || echo "_check produced no output (${OUTCOME})_" > "$OUT"
           {
             echo "### $TITLE"
             echo
             cat "$OUT"
             echo
-            echo "### Headless run cost: $WHAT"; echo '```json'; cat .cost-row.json; echo '```'
+            echo "### Headless run cost: $WHAT"; echo '```json'; echo "$ROW"; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Which tool call or hook refused what (mark-brannan/.github#97); the
