@@ -1,0 +1,156 @@
+name: coverage
+
+# Shared by every repository: of the executable lines a pull request adds or
+# changes, the share the test run hit, with the total and, where main's run at
+# the merge base kept its report, the total's move, written to the job summary.
+# A measurement, not a gate: the engine exits 0 whatever the numbers say, so
+# callers leave this job out of ci-gate's needs.
+#
+# The engine is .github/scripts/coverage.py in this repository (stdlib
+# Python); this workflow fetches it, installs lizard and runs it, the same
+# mechanism as complexity.yml. It reads Cobertura XML, which coverage.py, c8,
+# cargo-llvm-cov and gocover-cobertura all write, so the producer is the
+# caller's and the measurement is shared. With lizard it also lists each
+# touched function's cyclomatic complexity, covered share and CRAP score.
+#
+# The caller runs its tests once and uploads the report as an artifact (named
+# by the `artifact` input, the file in it by `report`), on pull requests and on
+# pushes to main: main's artifact at the merge base is what the total's delta
+# is measured against. Fetching it from another run needs `actions: read`;
+# without it, or when that run kept no report, the delta is left out with a
+# notice. Every row goes in the `coverage-report` artifact (coverage.json).
+#
+# The summary is also posted on the pull request as one comment, replaced on
+# each push. Posting needs `pull-requests: write`. This job declares no
+# permissions of its own and runs with whatever the caller grants, for the
+# reason complexity.yml gives; without the scope the comment is skipped with a
+# notice and the job stays green.
+#
+#     jobs:
+#       tests:
+#         steps:
+#           - run: python -m pytest --cov --cov-report=xml
+#           - uses: actions/upload-artifact@v7.0.2
+#             with: {name: coverage, path: coverage.xml}
+#       coverage:
+#         needs: tests
+#         permissions:
+#           contents: read
+#           actions: read
+#           pull-requests: write
+#         uses: mark-brannan/.github/.github/workflows/coverage.yml@main
+
+# No ref input: the engine always comes from main, except on this
+# repository's own PRs, which run the engine they carry from their checkout.
+on:
+  workflow_call:
+    inputs:
+      artifact:
+        description: The caller's artifact holding the Cobertura report
+        type: string
+        default: coverage
+      report:
+        description: The report's file name inside the artifact
+        type: string
+        default: coverage.xml
+
+env:
+  LIZARD_VERSION: 1.24.1
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - if: github.repository != 'mark-brannan/.github'
+        uses: actions/checkout@v7
+        with:
+          repository: mark-brannan/.github
+          ref: main
+          sparse-checkout: |
+            /.github/scripts/coverage.py
+          sparse-checkout-cone-mode: false
+          path: .coverage-engine
+          persist-credentials: false
+      - name: Install lizard
+        run: python3 -m pip install -q "lizard==$LIZARD_VERSION"
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: ${{ inputs.artifact }}
+          path: ${{ runner.temp }}/head
+      # main's push run at the merge base, the same workflow file as this run.
+      - name: Fetch main's report at the merge base
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          ARTIFACT: ${{ inputs.artifact }}
+        run: |
+          set -euo pipefail
+          mb=$(git merge-base "$BASE" HEAD)
+          wf=${WORKFLOW_REF%@*}; wf=${wf#"$REPO"/}; wf=${wf##*/}
+          runs=$(gh api "repos/$REPO/actions/workflows/$wf/runs?head_sha=$mb&event=push&branch=main" \
+            --jq '.workflow_runs[].id' 2>/dev/null || true)
+          for id in $runs; do
+            if gh run download "$id" -R "$REPO" -n "$ARTIFACT" -D "$RUNNER_TEMP/base" 2>/dev/null; then
+              echo "base report: run $id at ${mb:0:7}"
+              exit 0
+            fi
+          done
+          echo "::notice::coverage: no report from main's $wf run at ${mb:0:7} (none kept, or no actions: read); the total's delta is left out."
+      - name: coverage
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          SELF: ${{ github.repository == 'mark-brannan/.github' }}
+          REPORT: ${{ inputs.report }}
+        run: |
+          set -euo pipefail
+          engine=.coverage-engine/.github/scripts/coverage.py
+          if [ "$SELF" = true ]; then engine=.github/scripts/coverage.py; fi
+          echo "engine: $engine · lizard $(lizard --version)"
+          base=()
+          if [ -f "$RUNNER_TEMP/base/$REPORT" ]; then base=(--base-coverage "$RUNNER_TEMP/base/$REPORT"); fi
+          python3 "$engine" --coverage "$RUNNER_TEMP/head/$REPORT" "${base[@]}" --base "$BASE" \
+            --json "$RUNNER_TEMP/coverage.json" > "$RUNNER_TEMP/coverage.md"
+          tee -a "$GITHUB_STEP_SUMMARY" < "$RUNNER_TEMP/coverage.md"
+      - name: Post the summary on the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          mark='<!-- coverage-report -->'
+          body="$RUNNER_TEMP/comment.md"
+          {
+            echo "$mark"
+            cat "$RUNNER_TEMP/coverage.md"
+            echo "Every row is in the run's \`coverage-report\` artifact: [coverage run]($RUN_URL)"
+          } > "$body"
+          # A comment holds 65536 characters; past that, keep the table and drop the collapsed functions.
+          if [ "$(wc -c < "$body")" -gt 60000 ]; then
+            sed -i '/^<details>/,/^<\/details>$/d' "$body"
+          fi
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq "[.[] | select(.body | startswith(\"$mark\")) | .id] | first // empty" 2>/dev/null | head -n1 || true)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$body" > /dev/null \
+              || echo "::notice::coverage: could not update comment $id; the report is in the job summary."
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@"$body" > /dev/null \
+              || echo "::notice::coverage: could not comment (needs pull-requests: write); the report is in the job summary."
+          fi
+      - name: Upload every row
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: coverage-report
+          path: ${{ runner.temp }}/coverage.json
+          if-no-files-found: ignore
+          retention-days: 90

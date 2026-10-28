@@ -85,6 +85,17 @@ jobs:
       pull-requests: write
     uses: ./.github/workflows/complexity.yml
 
+  # The coverage engine's suite, on hand-written Cobertura reports and a stub
+  # lizard; seconds. The workflow itself is not run here: this repo has no
+  # test run to measure.
+  coverage-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: python3 .github/scripts/coverage.test.py
+
   # The duplication engine's suite, with a stub jscpd; seconds.
   duplication-tests:
     runs-on: ubuntu-latest
@@ -136,7 +147,7 @@ jobs:
   # The single required status check. `always()` lets it evaluate when a
   # dependency failed or was skipped instead of inheriting the skip.
   ci-gate:
-    needs: [nonempty, pr-title, secret-scan, complexity-tests, headless-run-cost-tests, duplication-tests, golden-diff-tests, show-dont-tell-tests, review-metrics-tests]
+    needs: [nonempty, pr-title, secret-scan, complexity-tests, coverage-tests, headless-run-cost-tests, duplication-tests, golden-diff-tests, show-dont-tell-tests, review-metrics-tests]
     if: always()
     permissions: {}
     uses: ./.github/workflows/ci-gate.yml
