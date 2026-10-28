@@ -86,3 +86,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261017t071430z
 - show-dont-tell: a preview URL satisfies the check only when the repo's opt-in file names its prefix under urls:; without urls: only an image counts, because the agent attribution link https://claude.com/claude-code met the any-https-link default in every agent-written body Undo: restore the any-https-link-off-github.com default in scanBody and its tests (revert 047ba9c) ([#78](https://github.com/mark-brannan/.github/pull/78))
+
+### 20261028t034334z
+- README coverage row keeps the clause that the tests job uploads a Cobertura coverage artifact, against the review's suggested cut, because the caller has to set it up Undo: drop the clause from README.md's coverage.yml row ([#102](https://github.com/mark-brannan/.github/pull/102))
