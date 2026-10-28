@@ -40,9 +40,8 @@ name: coverage
 #           pull-requests: write
 #         uses: mark-brannan/.github/.github/workflows/coverage.yml@main
 
-# No ref input: the engine comes from the commit this workflow file was read
-# at (main, for a caller on @main), so a caller pinned to a branch or SHA runs
-# the engine beside it; this repository's own PRs run the one they carry.
+# No ref input: the engine always comes from main, except on this
+# repository's own PRs, which run the engine they carry from their checkout.
 on:
   workflow_call:
     inputs:
@@ -71,7 +70,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: mark-brannan/.github
-          ref: ${{ github.job_workflow_sha || 'main' }}
+          ref: main
           sparse-checkout: |
             /.github/scripts/coverage.py
           sparse-checkout-cone-mode: false
