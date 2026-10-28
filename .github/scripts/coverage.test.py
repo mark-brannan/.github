@@ -17,8 +17,7 @@ from pathlib import Path
 
 TOOL = Path(__file__).resolve().parent / "coverage.py"
 
-LIZARD = r'''#!/usr/bin/env python3
-import sys
+LIZARD = "#!%s\n" % sys.executable + r'''import sys
 for f in sys.argv[2:]:
     n = sum(1 for _ in open(f))
     print('%d,3,7,0,%d,"f@1-%d@%s","%s","f","f()",1,%d' % (n, n, n, f, f, n))

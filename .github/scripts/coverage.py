@@ -38,7 +38,7 @@ def die(msg):
 
 
 def git(*args, root):
-    p = subprocess.run(["git", "-C", root, *args], capture_output=True)
+    p = subprocess.run(["git", "-c", "core.quotePath=off", "-C", root, *args], capture_output=True)
     if p.returncode:
         die("git %s: %s" % (args[0], p.stderr.decode(errors="replace").strip()))
     return p.stdout
@@ -143,8 +143,10 @@ def functions(root, files, changed):
         if path not in files or not any(start <= n <= end for n in changed[path]):
             continue
         execu = [n for n in range(start, end + 1) if n in files[path]]
+        if not execu:
+            continue
         hit = sum(1 for n in execu if files[path][n])
-        cov = hit / len(execu) if execu else 0.0
+        cov = hit / len(execu)
         crap = round(cc * cc * (1 - cov) ** 3 + cc, 1)
         out.append({"path": path, "function": func, "line": start, "ccn": cc, "executable": len(execu),
                     "covered": hit, "pct": pct(hit, len(execu)), "crap": crap})
@@ -159,8 +161,8 @@ def markdown(rep):
     else:
         head = "### Coverage: no executable line changed"
     t, b = rep["total"], rep.get("base_total")
-    tot = "total %.1f%%" % t["pct"]
-    if b and b["pct"] is not None:
+    tot = "total %s" % ("—" if t["pct"] is None else "%.1f%%" % t["pct"])
+    if b and b["pct"] is not None and t["pct"] is not None:
         tot += " (%+.1f from %.1f%%)" % (t["pct"] - b["pct"], b["pct"])
     lines = [head + " · " + tot, ""]
     if rep["files"]:

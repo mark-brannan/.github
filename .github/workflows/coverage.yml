@@ -83,19 +83,20 @@ jobs:
         with:
           name: ${{ inputs.artifact }}
           path: ${{ runner.temp }}/head
-      # main's push run at the merge base, the same workflow file as this run.
-      - name: Fetch main's report at the merge base
+      # The base branch's push run at the merge base, the same workflow file as this run.
+      - name: Fetch the base branch's report at the merge base
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           BASE: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           WORKFLOW_REF: ${{ github.workflow_ref }}
           ARTIFACT: ${{ inputs.artifact }}
         run: |
           set -euo pipefail
           mb=$(git merge-base "$BASE" HEAD)
           wf=${WORKFLOW_REF%@*}; wf=${wf#"$REPO"/}; wf=${wf##*/}
-          runs=$(gh api "repos/$REPO/actions/workflows/$wf/runs?head_sha=$mb&event=push&branch=main" \
+          runs=$(gh api "repos/$REPO/actions/workflows/$wf/runs?head_sha=$mb&event=push&branch=$BASE_REF" \
             --jq '.workflow_runs[].id' 2>/dev/null || true)
           for id in $runs; do
             if gh run download "$id" -R "$REPO" -n "$ARTIFACT" -D "$RUNNER_TEMP/base" 2>/dev/null; then
@@ -103,7 +104,7 @@ jobs:
               exit 0
             fi
           done
-          echo "::notice::coverage: no report from main's $wf run at ${mb:0:7} (none kept, or no actions: read); the total's delta is left out."
+          echo "::notice::coverage: no report from $BASE_REF's $wf run at ${mb:0:7} (none kept, or no actions: read); the total's delta is left out."
       - name: coverage
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
