@@ -943,12 +943,13 @@ jobs:
           # Comments cannot go inside claude_args; the action passes that
           # block through to the CLI verbatim.
           #
-          # --permission-mode default: a headless run names its own mode. The
-          # seeded $HOME/.claude/settings.json is user scope, and a
-          # permissions.defaultMode there (auto, for interactive sessions)
-          # would otherwise be read by `claude -p` and put the classifier,
-          # not the --allowedTools list, in charge of what runs here
-          # (mark-brannan/claude#349).
+          # --permission-mode default: a headless run names its own mode. Tag
+          # mode (track_progress) passes --permission-mode acceptEdits ahead of
+          # these args; this later flag wins, so the reviewer cannot edit the
+          # checkout, which the brief already forbids. It also sits above a
+          # permissions.defaultMode in the seeded user-scope settings.json
+          # (auto, for interactive sessions: mark-brannan/claude#349), which
+          # `claude -p` reads. The step below proves which mode ran.
           claude_args: |
             --model "${{ steps.triage.outputs.model }}" ${{ steps.triage.outputs.effort-arg }}
             --permission-mode default
@@ -967,6 +968,20 @@ jobs:
             echo "languette plugin loaded; the review ran under its guards"
           else
             echo "::warning::languette plugin did not load -- this review ran without its guards"
+          fi
+
+      # Proof the mode flag took effect, from the same init message: the mode
+      # the CLI started in, not the one the args asked for.
+      - if: steps.review.outputs.execution_file != ''
+        name: Verify the review ran in default permission mode
+        env:
+          EXEC: ${{ steps.review.outputs.execution_file }}
+        run: |
+          mode=$(jq -r '[.[] | select(.type == "system" and .subtype == "init") | .permissionMode][0] // "unknown"' "$EXEC")
+          if [ "$mode" = "default" ]; then
+            echo "review ran in default permission mode"
+          else
+            echo "::warning::review ran in permission mode '$mode', not default -- the --permission-mode flag did not take effect"
           fi
 
       # The cost of each check (mark-brannan/claude#219): the execution file
