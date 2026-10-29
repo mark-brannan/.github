@@ -942,8 +942,16 @@ jobs:
             would find obvious; state the answer as a fix instead.
           # Comments cannot go inside claude_args; the action passes that
           # block through to the CLI verbatim.
+          #
+          # --permission-mode default: a headless run names its own mode. The
+          # seeded $HOME/.claude/settings.json is user scope, and a
+          # permissions.defaultMode there (auto, for interactive sessions)
+          # would otherwise be read by `claude -p` and put the classifier,
+          # not the --allowedTools list, in charge of what runs here
+          # (mark-brannan/claude#349).
           claude_args: |
             --model "${{ steps.triage.outputs.model }}" ${{ steps.triage.outputs.effort-arg }}
+            --permission-mode default
             --allowedTools "${{ env.REVIEW_TOOLS }}${{ inputs.allowed-tools && format(',{0}', inputs.allowed-tools) || '' }},Read(.writing-rubric.md),Read(.prior-threads.json)"
 
       # Proof the guards were live, read from the session's own init message
@@ -1061,8 +1069,10 @@ jobs:
           # absolute-path rule form, runner.temp already starting with a /.
           # One / would mean relative to the project root and match nothing
           # (mark-brannan/.github#97). Comments cannot go inside the block.
+          # --permission-mode default: see the review step.
           claude_args: |
             --model claude-sonnet-5-5 --effort medium
+            --permission-mode default
             --allowedTools "Skill,Read,Glob,Grep,Read(~/.claude/skills/**),Bash(gh pr diff:*),Bash(gh pr view:*),Edit(/${{ runner.temp }}/claude-checks/maxims.md)"
 
       # The cost row comes from the shared headless-run-cost action.
@@ -1164,8 +1174,10 @@ jobs:
           # absolute-path rule form, runner.temp already starting with a /.
           # One / would mean relative to the project root and match nothing
           # (mark-brannan/.github#97). Comments cannot go inside the block.
+          # --permission-mode default: see the review step.
           claude_args: |
             --model claude-sonnet-5-5 --effort medium
+            --permission-mode default
             --allowedTools "Skill,Read,Glob,Grep,Read(~/.claude/skills/**),Bash(gh pr diff:*),Bash(gh pr view:*),Edit(/${{ runner.temp }}/claude-checks/arete.md)"
 
       - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
