@@ -905,7 +905,7 @@ jobs:
       # runner has no plugin cache, so the action installs it here.
       - if: steps.gate.outputs.run == 'true'
         id: review
-        uses: anthropics/claude-code-action@db77d4d3c98f3f6380e7cd45ffba2342a3dbde3c # v1.0.254
+        uses: anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb # v1.0.263
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
@@ -1030,7 +1030,7 @@ jobs:
       # landed: the two are independent readings of the same diff.
       - if: "!cancelled() && steps.gate.outputs.checks == 'true'"
         id: maxims
-        uses: anthropics/claude-code-action@db77d4d3c98f3f6380e7cd45ffba2342a3dbde3c # v1.0.254
+        uses: anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb # v1.0.263
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: mergify[bot],mark-brannan-release-please[bot],claude[bot],mark-brannan-agent[bot],${{ inputs.allowed-bots }}
@@ -1132,7 +1132,7 @@ jobs:
       # per review for the cap and the "review landed" check.
       - if: "!cancelled() && steps.gate.outputs.checks == 'true'"
         id: arete
-        uses: anthropics/claude-code-action@db77d4d3c98f3f6380e7cd45ffba2342a3dbde3c # v1.0.254
+        uses: anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb # v1.0.263
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: mergify[bot],mark-brannan-release-please[bot],claude[bot],mark-brannan-agent[bot],${{ inputs.allowed-bots }}
