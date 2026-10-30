@@ -167,7 +167,8 @@ name: Claude PR Review
 # A second job, `fixer`, follows a review that posted: it applies the review's
 # [easy] findings and commits them as the agent App (see the job). It needs
 # AGENT_BOT_APP_ID and AGENT_BOT_PRIVATE_KEY passed as secrets, and the App
-# needs Contents: write; without the secrets it skips with a warning.
+# needs Contents: write; without the secrets it skips with a warning. A
+# `fixer:skip` label keeps it off one pull request.
 
 on:
   workflow_call:
@@ -1298,6 +1299,7 @@ jobs:
   # label or `followup-risky-only: false` lets that review post again), so the
   # job skips when the agent App sent the event, and plan takes nothing on a
   # head whose message carries the fixer's `Claude-Fixer-Run:` trailer.
+  # An author who wants no commits from it labels the PR `fixer:skip`.
   fixer:
     needs: review
     if: needs.review.outputs.posted == 'true' && github.event.sender.login != 'mark-brannan-agent[bot]'
@@ -1316,35 +1318,46 @@ jobs:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       FIXER_MODEL: claude-haiku-5-5
     steps:
-      - name: Check the agent App is configured
+      - name: Check the agent App is configured and the PR has not opted out
         id: app
         env:
           APP_ID: ${{ secrets.AGENT_BOT_APP_ID }}
           APP_KEY: ${{ secrets.AGENT_BOT_PRIVATE_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          PAYLOAD_LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
         run: |
           # Outside the checkout, so nothing here can reach the commit.
           echo "FIXER_DIR=$RUNNER_TEMP/claude-fixer" >> "$GITHUB_ENV"
+          # Read live, as triage does: a label added while the review ran counts.
+          LABELS=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name] | join(" ")') \
+            || { echo "::warning::could not read the PR's labels live; using the event's"; LABELS=$PAYLOAD_LABELS; }
           if [ -n "$APP_ID" ] && [ -n "$APP_KEY" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
+            case " $LABELS " in
+              *" fixer:skip "*)
+                echo "run=false" >> "$GITHUB_OUTPUT"
+                echo "### Claude fixer: skipped (fixer:skip label)" >> "$GITHUB_STEP_SUMMARY"
+                exit 0 ;;
+            esac
+            echo "run=true" >> "$GITHUB_OUTPUT"
           else
-            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "run=false" >> "$GITHUB_OUTPUT"
             echo "::warning::AGENT_BOT_APP_ID or AGENT_BOT_PRIVATE_KEY is not set; the fixer skips"
             echo "### Claude fixer: skipped (the agent App's secrets are not set)" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - if: steps.app.outputs.present == 'true'
+      - if: steps.app.outputs.run == 'true'
         uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
 
-      - if: steps.app.outputs.present == 'true'
+      - if: steps.app.outputs.run == 'true'
         id: tools
         uses: mark-brannan/.github/.github/actions/easy-fixes@main
 
       # This head's [easy] threads, with the suggestion fences applied and a
       # risky path refused; what is left is the agent's.
-      - if: steps.app.outputs.present == 'true'
+      - if: steps.app.outputs.run == 'true'
         name: List this head's easy threads and apply their suggestions
         id: plan
         env:
