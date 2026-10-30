@@ -1,0 +1,18 @@
+name: easy-fixes
+description: >
+  Puts the claude-review fixer job's script (fixer.py, beside this file) on the
+  runner and outputs its path. A reusable workflow runs in the caller's
+  checkout, so a script beside the workflow would not be there to call; an
+  action's own directory is.
+
+outputs:
+  script:
+    description: Absolute path of fixer.py on the runner
+    value: ${{ steps.path.outputs.script }}
+
+runs:
+  using: composite
+  steps:
+    - id: path
+      shell: bash
+      run: echo "script=$GITHUB_ACTION_PATH/fixer.py" >> "$GITHUB_OUTPUT"
