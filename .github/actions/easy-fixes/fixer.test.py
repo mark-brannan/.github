@@ -22,11 +22,11 @@ SIGN = "🤖 claude-fixer · run 1"
 
 
 def node(i, path, line, body, start=None, login="claude", commit=HEAD, total=1,
-         resolved=False, side="RIGHT"):
+         resolved=False, side="RIGHT", kind="Bot"):
     return {"id": f"T{i}", "isResolved": resolved, "path": path, "diffSide": side,
             "originalLine": line, "originalStartLine": start,
             "comments": {"totalCount": total, "nodes": [{
-                "databaseId": 100 + i, "url": f"https://x/{i}", "author": {"login": login},
+                "databaseId": 100 + i, "url": f"https://x/{i}", "author": {"login": login, "__typename": kind},
                 "body": body, "originalCommit": {"oid": commit}}]}}
 
 
@@ -63,9 +63,14 @@ class Repo:
     def tmp(self, name):
         return str(Path(self.root, "..", name).resolve())
 
-    def plan(self, nodes):
+    def plan(self, nodes, head_message=None):
         Path(self.tmp("threads.json")).write_text(json.dumps(nodes))
-        res = self.run("plan", "--threads", self.tmp("threads.json"), "--head", HEAD, "--root", self.root)
+        extra = []
+        if head_message is not None:
+            Path(self.tmp("msg.txt")).write_text(head_message)
+            extra = ["--head-message", self.tmp("msg.txt")]
+        res = self.run("plan", "--threads", self.tmp("threads.json"), "--head", HEAD, "--root", self.root,
+                       *extra)
         Path(self.tmp("plan.json")).write_text(json.dumps(res))
         return res
 
@@ -133,6 +138,7 @@ class Plan(unittest.TestCase):
         res = r.plan([
             node(1, "a.txt", 1, "🤖 [nit] fix it"),                      # not [easy]
             node(2, "a.txt", 1, fence("x\n"), login="someone"),          # not the bot
+            node(7, "a.txt", 1, fence("x\n"), kind="User"),              # a User named claude
             node(3, "a.txt", 1, fence("x\n"), commit="b" * 40),          # another head
             node(4, "a.txt", 1, fence("x\n"), total=2),                  # answered
             node(5, "a.txt", 1, fence("x\n"), resolved=True),            # resolved
@@ -140,6 +146,34 @@ class Plan(unittest.TestCase):
         ])
         self.assertEqual([(t["thread_id"], t["status"]) for t in res], [("T6", "agent")])
         self.assertEqual(r.read("a.txt"), "1\n")
+
+    def test_a_user_named_claude_is_not_the_bot(self):
+        r = Repo({"src/x.py": "ok\n"})
+        res = r.plan([node(1, "src/x.py", 1, fence("evil\n"), kind="User"),
+                      node(2, "src/x.py", 1, fence("evil\n"), login="claude[bot]", kind="User")])
+        self.assertEqual(res, [])
+        self.assertEqual(r.read("src/x.py"), "ok\n")
+
+    def test_a_head_the_fixer_committed_is_not_fixed_again(self):
+        r = Repo({"a.txt": "1\n"})
+        res = r.plan([node(1, "a.txt", 1, fence("A\n"))],
+                     head_message="fix: apply 1 easy review finding(s)\n\n- u\n\nClaude-Fixer-Run: 42\n")
+        self.assertEqual(res, [])
+        self.assertEqual(r.read("a.txt"), "1\n")
+        res = r.plan([node(1, "a.txt", 1, fence("A\n"))], head_message="a human commit\n")
+        self.assertEqual(res[0]["status"], "fixed")
+
+    def test_agent_lines_move_past_a_suggestion_above_them(self):
+        r = Repo({"a.txt": "".join(f"{i}\n" for i in range(1, 13))})
+        res = r.plan([node(1, "a.txt", 2, fence("two\ntwo-b\ntwo-c\n")),   # 1 line -> 3
+                      node(2, "a.txt", 10, "🤖 [nit] [easy] say ten", start=9),
+                      node(3, "a.txt", 3, "🤖 [nit] [easy] above? no, below"),
+                      node(4, "a.txt", 2, "🤖 [nit] [easy] same line as the fence")])
+        st = {t["thread_id"]: t for t in res}
+        self.assertEqual((st["T2"]["start"], st["T2"]["end"]), (11, 12))
+        self.assertEqual(r.read("a.txt").splitlines()[11], "10")
+        self.assertEqual((st["T3"]["start"], st["T3"]["end"]), (5, 5))
+        self.assertEqual(st["T4"]["status"], "left")
 
     def test_overlap_out_of_range_and_left_side_are_not_taken(self):
         r = Repo({"a.txt": "1\n2\n3\n"})
@@ -170,6 +204,30 @@ class Gate(unittest.TestCase):
         self.assertEqual(st["T1"][0], "fixed")
         self.assertEqual(st["T2"][0], "fixed")
         self.assertEqual(st["T3"], ("left", "ambiguous"))
+
+    def test_a_file_with_an_unfinished_agent_thread_is_reverted_whole(self):
+        r = Repo({"a.py": "1\n2\n3\n", "b.py": "1\n2\n3\n"})
+        r.plan([node(1, "a.py", 1, "🤖 [nit] [easy] t1"), node(2, "a.py", 3, "🤖 [nit] [easy] t2"),
+                node(3, "b.py", 1, fence("ONE\n")), node(4, "b.py", 3, "🤖 [nit] [easy] t4")])
+        # a.py: half of T1, all of T2; T1 declined. b.py: the agent declines
+        # T4 without touching it, so the suggestion stays.
+        r.write("a.py", "half\n2\nTHREE\n")
+        res = r.gate([{"thread_id": "T1", "done": False, "why": "unclear"},
+                      {"thread_id": "T2", "done": True},
+                      {"thread_id": "T4", "done": False, "why": "unclear"}])
+        self.assertEqual([a["path"] for a in res["additions"]], ["b.py"])
+        self.assertEqual(r.read("a.py"), "1\n2\n3\n")
+        st = {t["thread_id"]: t["status"] for t in res["threads"]}
+        self.assertEqual(st, {"T1": "left", "T2": "left", "T3": "fixed", "T4": "left"})
+
+    def test_a_declined_thread_reverts_the_suggestion_it_shares_a_file_with_when_touched(self):
+        r = Repo({"b.py": "1\n2\n3\n"})
+        r.plan([node(1, "b.py", 1, fence("ONE\n")), node(2, "b.py", 3, "🤖 [nit] [easy] t2")])
+        r.write("b.py", "ONE\n2\nhalf\n")
+        res = r.gate([])  # the agent died before answering
+        self.assertEqual(res["additions"], [])
+        self.assertEqual(r.read("b.py"), "1\n2\n3\n")
+        self.assertEqual([t["status"] for t in res["threads"]], ["not-taken", "left"])
 
     def test_an_edit_through_a_symlink_is_reverted_at_commit(self):
         r = Repo({"docs/a.md": "1\n", "hooks/y.py": "1\n"})

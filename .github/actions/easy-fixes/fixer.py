@@ -5,9 +5,13 @@ that decides which thread is taken and which path may be committed lives here,
 where the tests reach it.
 
   plan    the review threads (GraphQL nodes) -> this head's open [easy] threads,
-          risky paths refused, suggestion fences applied to the checkout
+          risky paths refused, suggestion fences applied to the checkout and
+          the agent's line numbers moved past them; nothing on a head the
+          fixer itself committed
   gate    after the agent: every changed tracked path not risky and named by a
-          taken thread is kept, every other one reverted; the kept files become
+          taken thread is kept, every other one reverted, and so is a file the
+          agent edited while leaving one of its threads unfinished; the kept
+          files become
           createCommitOnBranch additions
   report  the commit's sha (or why there is none) -> one reply per thread and
           the roll-up for the job summary
@@ -19,6 +23,7 @@ separated, matched against the path from the repo root like a `case` pattern
 import argparse
 import base64
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -29,6 +34,9 @@ from pathlib import Path
 EASY = re.compile(r"^\s*(?:🤖\s*)?\[(?:nit|should)\]\s*\[easy\]")
 FENCE = re.compile(r"^```suggestion[ \t]*\r?\n(.*?)^```[ \t]*\r?$", re.S | re.M)
 BOT_LOGINS = {"claude", "claude[bot]"}
+# Every fixer commit carries this trailer, and a head that does is not fixed
+# again: the fixer never answers its own commit.
+TRAILER = "Claude-Fixer-Run:"
 
 
 def risky_globs():
@@ -81,7 +89,10 @@ def easy_threads(nodes, head):
         if n.get("isResolved") or not comments:
             continue
         first = comments[0]
-        if ((first.get("author") or {}).get("login") not in BOT_LOGINS
+        author = first.get("author") or {}
+        # A login alone is not enough: `claude` is also a User account, and
+        # anyone can comment on a public PR.
+        if (author.get("__typename") != "Bot" or author.get("login") not in BOT_LOGINS
                 or not EASY.match(first.get("body") or "")
                 or ((first.get("originalCommit") or {}).get("oid") != head)
                 or (n.get("comments") or {}).get("totalCount", len(comments)) != 1):
@@ -107,17 +118,19 @@ def eol_of(line):
 
 def apply_file(root, path, threads):
     """Apply each thread's single suggestion to one file, bottom-up so earlier
-    line numbers stay true; an overlapping or out-of-range one is not taken."""
+    line numbers stay true; an overlapping or out-of-range one is not taken.
+    Returns what was replaced, (start, end, new line count) each, so the
+    agent's line numbers on the same file can be moved to match."""
     p = Path(root) / path
     try:
         text = p.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError) as e:
         for t in threads:
             t.update(status="not-taken", why=f"cannot read {path}: {e.__class__.__name__}")
-        return
+        return []
     lines = text.splitlines(keepends=True)
     floor = None  # lowest start line already replaced
-    changed = False
+    done = []
     for t in sorted(threads, key=lambda t: (t["start"], t["end"]), reverse=True):
         s, e = t["start"], t["end"]
         if not (1 <= s <= e <= len(lines)):
@@ -139,13 +152,44 @@ def apply_file(root, path, threads):
             continue
         lines[s - 1:e] = repl
         floor = s
-        changed = True
+        done.append((s, e, len(repl)))
         t.update(status="fixed", how="suggestion")
-    if changed:
+    if done:
         p.write_bytes("".join(lines).encode("utf-8"))
+    return done
 
 
-def plan(nodes, head, root, globs):
+def shift(t, replaced):
+    """Move an agent thread's lines past the suggestions applied above it, or
+    say why it cannot be: its own lines were replaced."""
+    s, e = t.get("start"), t.get("end")
+    if e is None:
+        return None
+    s = s or e
+    delta = 0
+    for rs, rend, n in replaced:
+        if rs <= e and s <= rend:
+            return "a suggestion on the same lines was applied first"
+        if rend < s:
+            delta += n - (rend - rs + 1)
+    t.update(start=s + delta, end=e + delta)
+    return None
+
+
+def digest(root, path):
+    try:
+        return hashlib.sha256((Path(root) / path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def by_fixer(message):
+    return any(ln.strip().startswith(TRAILER) for ln in (message or "").splitlines())
+
+
+def plan(nodes, head, root, globs, head_message=""):
+    if by_fixer(head_message):
+        return []
     threads = easy_threads(nodes, head)
     by_path = {}
     for t in threads:
@@ -167,10 +211,17 @@ def plan(nodes, head, root, globs):
         else:
             t["suggestion"] = fences[0]
             by_path.setdefault(path, []).append(t)
-    for path, ts in by_path.items():
-        apply_file(root, path, ts)
+    replaced = {path: apply_file(root, path, ts) for path, ts in by_path.items()}
     for t in threads:
         t.pop("suggestion", None)
+        if t.get("status") == "agent":
+            why = shift(t, replaced.get(t["path"], []))
+            if why:
+                t.update(status="left", why=why)
+            else:
+                # The file as the agent finds it, so the gate can tell
+                # whether the agent touched it.
+                t["base"] = digest(root, t["path"])
     return threads
 
 
@@ -194,13 +245,22 @@ def gate(threads, agent, root, globs):
     """Keep only changes a taken thread names, off the risky class; revert the
     rest. Returns the threads with final statuses and the files to commit."""
     answers = {a.get("thread_id"): a for a in agent if isinstance(a, dict)}
+    agent_threads = [t for t in threads if t.get("status") == "agent"]
+    unfinished = {t["path"] for t in agent_threads
+                  if answers.get(t["thread_id"], {}).get("done") is not True}
+    # A file the agent edited while leaving one of its threads unfinished is
+    # reverted whole: a half edit must not ride in on another thread's fix.
+    touched_unfinished = {p for p in unfinished
+                          if any(t["path"] == p and t.get("base") != digest(root, p)
+                                 for t in agent_threads)}
     allowed = {t["path"] for t in threads if t.get("status") == "fixed"}
-    allowed |= {t["path"] for t in threads
-                if t.get("status") == "agent" and answers.get(t["thread_id"], {}).get("done") is True}
+    allowed |= {t["path"] for t in agent_threads if t["path"] not in unfinished}
     kept, reverted = [], {}
     for path, deleted in changed_tracked(root):
         if is_risky(path, globs):
             why = "risky path"
+        elif path in touched_unfinished:
+            why = "the agent edited it but left a thread on it unfinished"
         elif path not in allowed:
             why = "no taken thread names this path"
         elif deleted:
@@ -267,6 +327,7 @@ def main(argv=None):
     p.add_argument("--threads", required=True)
     p.add_argument("--head", required=True)
     p.add_argument("--root", default=".")
+    p.add_argument("--head-message", default="", help="file holding the head commit's message")
     p.add_argument("--out", required=True)
     g = sub.add_parser("gate")
     g.add_argument("--plan", required=True)
@@ -284,7 +345,8 @@ def main(argv=None):
     globs = risky_globs()
     if a.cmd == "plan":
         nodes = json.loads(Path(a.threads).read_text())
-        res = plan(nodes, a.head, a.root, globs)
+        msg = Path(a.head_message).read_text() if a.head_message else ""
+        res = plan(nodes, a.head, a.root, globs, msg)
     elif a.cmd == "gate":
         try:
             agent = json.loads(Path(a.agent).read_text())

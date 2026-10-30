@@ -1293,13 +1293,14 @@ jobs:
   # pushed from the runner. Each thread gets one reply, with the sha or why
   # not; none is resolved, that stays the author's.
   #
-  # Runs only behind a review this run posted: its own commit fires
-  # `synchronize`, whose review skips under `followup-risky-only` (the fixer
-  # never touches a risky line), so posts nothing, so this job does not run
-  # again.
+  # Runs only behind a review this run posted, and never on its own work: an
+  # App-token commit or update-branch fires `synchronize` (a `review:deep`
+  # label or `followup-risky-only: false` lets that review post again), so the
+  # job skips when the agent App sent the event, and plan takes nothing on a
+  # head whose message carries the fixer's `Claude-Fixer-Run:` trailer.
   fixer:
     needs: review
-    if: needs.review.outputs.posted == 'true'
+    if: needs.review.outputs.posted == 'true' && github.event.sender.login != 'mark-brannan-agent[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 10  # stand-in until three runs are measured
     concurrency:
@@ -1331,15 +1332,6 @@ jobs:
             echo "### Claude fixer: skipped (the agent App's secrets are not set)" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # No permission is requested, so the token carries whatever the App has;
-      # one without Contents: write fails at the commit, which says so.
-      - if: steps.app.outputs.present == 'true'
-        id: token
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ secrets.AGENT_BOT_APP_ID }}
-          private-key: ${{ secrets.AGENT_BOT_PRIVATE_KEY }}
-
       - if: steps.app.outputs.present == 'true'
         uses: actions/checkout@v7
         with:
@@ -1368,10 +1360,16 @@ jobs:
                   reviewThreads(last: 100) {
                     nodes { id isResolved path diffSide originalLine originalStartLine
                       comments(first: 1) { totalCount
-                        nodes { databaseId url body author { login } originalCommit { oid } } } } } } } }' \
+                        nodes { databaseId url body author { login __typename } originalCommit { oid } } } } } } } }' \
             --jq '.data.repository.pullRequest.reviewThreads.nodes' > "$FIXER_DIR/threads.json"
+          git log -1 --format=%B "$HEAD_SHA" > "$FIXER_DIR/head-message.txt"
           RISKY="$RISKY_BUILTIN ${RISKY_PATHS:-}" python3 "$SCRIPT" plan \
-            --threads "$FIXER_DIR/threads.json" --head "$HEAD_SHA" --root . --out "$FIXER_DIR/plan.json"
+            --threads "$FIXER_DIR/threads.json" --head "$HEAD_SHA" --root . \
+            --head-message "$FIXER_DIR/head-message.txt" --out "$FIXER_DIR/plan.json"
+          # Step outputs are out of the agent's reach: the steps after it check
+          # the script and the plan against these before running either.
+          echo "script-sha=$(sha256sum "$SCRIPT" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "plan-sha=$(sha256sum "$FIXER_DIR/plan.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           jq '[.[] | select(.status == "agent") | {thread_id, path, line: .end, finding: .body}]' \
             "$FIXER_DIR/plan.json" > "$FIXER_DIR/tasks.json"
           echo '[]' > "$FIXER_DIR/agent.json"
@@ -1408,23 +1406,44 @@ jobs:
           claude_args: |
             --model ${{ env.FIXER_MODEL }} --effort low
             --permission-mode default
+            --setting-sources user --strict-mcp-config
             --allowedTools "Read,Glob,Grep,${{ steps.plan.outputs.edit-tools }}"
 
+      # Minted only now, after the agent, so nothing the agent's run touched
+      # ever held it. No permission is requested, so the token carries
+      # whatever the App has; one without Contents: write fails at the commit,
+      # which says so.
+      - if: "!cancelled() && steps.plan.outcome == 'success' && steps.plan.outputs.threads > 0"
+        id: token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.AGENT_BOT_APP_ID }}
+          private-key: ${{ secrets.AGENT_BOT_PRIVATE_KEY }}
+
+      # Runs whatever the agent did, so a failed agent never costs the
+      # suggestion fixes; an agent thread with no answer is `left`.
       # The second risky check, on what is actually in the tree: every change
       # a taken thread does not name, or on a risky path, is reverted here and
       # never reaches the commit. createCommitOnBranch makes one signed commit
       # on the head the threads were read from (expectedHeadOid), so a push
       # in between fails the commit rather than overwriting it.
-      - if: steps.plan.outputs.threads > 0
+      - if: "!cancelled() && steps.plan.outcome == 'success' && steps.plan.outputs.threads > 0"
         name: Commit the fixes
         id: commit
         env:
           SCRIPT: ${{ steps.tools.outputs.script }}
+          SCRIPT_SHA: ${{ steps.plan.outputs.script-sha }}
+          PLAN_SHA: ${{ steps.plan.outputs.plan-sha }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           BRANCH: ${{ github.event.pull_request.head.ref }}
           AGENT_RAN: ${{ steps.agent.outputs.execution_file != '' }}
         run: |
           set -euo pipefail
+          if ! printf '%s  %s\n%s  %s\n' "$SCRIPT_SHA" "$SCRIPT" "$PLAN_SHA" "$FIXER_DIR/plan.json" | sha256sum -c --quiet; then
+            echo "failure=the fixer script or plan changed after the plan step" >> "$GITHUB_OUTPUT"
+            echo "::error::fixer.py or plan.json changed after the plan step; nothing committed"
+            exit 1
+          fi
           RISKY="$RISKY_BUILTIN ${RISKY_PATHS:-}" python3 "$SCRIPT" gate \
             --plan "$FIXER_DIR/plan.json" --agent "$FIXER_DIR/agent.json" --root . --out "$FIXER_DIR/gate.json"
           jq -r '.reverted[] | "::notice::reverted \(.path): \(.why)"' "$FIXER_DIR/gate.json"
@@ -1435,8 +1454,10 @@ jobs:
           fi
           fixed=$(jq '[.threads[] | select(.status == "fixed")] | length' "$FIXER_DIR/gate.json")
           body=$(jq -r '.threads[] | select(.status == "fixed") | "- \(.url)"' "$FIXER_DIR/gate.json")
+          # The trailer is how a later run knows this head is the fixer's own.
+          body=$(printf '%s\n\nClaude-Fixer-Run: %s' "$body" "$GITHUB_RUN_ID")
           if [ "$(jq '[.threads[] | select(.how == "agent")] | length' "$FIXER_DIR/gate.json")" -gt 0 ]; then
-            body=$(printf '%s\n\nCo-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>' "$body")
+            body=$(printf '%s\nCo-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>' "$body")
           fi
           jq -n --arg repo "$GITHUB_REPOSITORY" --arg branch "$BRANCH" --arg head "$HEAD_SHA" \
             --arg headline "fix: apply $fixed easy review finding(s)" --arg body "$body" \
@@ -1495,12 +1516,14 @@ jobs:
         name: Reply in each thread and roll up
         env:
           SCRIPT: ${{ steps.tools.outputs.script }}
+          SCRIPT_SHA: ${{ steps.plan.outputs.script-sha }}
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ steps.commit.outputs.sha }}
           FAILURE: ${{ steps.commit.outputs.failure || 'the commit step did not finish' }}
           NOTE: ${{ steps.update.outputs.note }}
         run: |
           set -euo pipefail
+          printf '%s  %s\n' "$SCRIPT_SHA" "$SCRIPT" | sha256sum -c --quiet
           # Without a gate file (the commit step died early) every thread is
           # reported from the plan.
           [ -f "$FIXER_DIR/gate.json" ] || jq '{threads: ., additions: [], reverted: []}' "$FIXER_DIR/plan.json" > "$FIXER_DIR/gate.json"
@@ -1519,20 +1542,23 @@ jobs:
         with:
           execution-file: ${{ steps.agent.outputs.execution_file }}
           what: claude-fixer
-          model: claude-haiku-5-5
+          model: ${{ env.FIXER_MODEL }}
           pr: ${{ github.event.pull_request.number }}
           fields: '{"head_sha":"${{ github.event.pull_request.head.sha }}"}'
 
       # One `headless-run` artifact per run is what metrics-db collects, and
       # the review job already uploaded it: fetch it, add this row, replace it.
+      # A failed download stops here: uploading the fixer's row alone would
+      # replace the review's rows.
       - if: always() && hashFiles('headless-run.jsonl') != ''
+        id: download
         continue-on-error: true
         uses: actions/download-artifact@v8.0.2
         with:
           name: headless-run
           path: ${{ runner.temp }}/review-artifact
 
-      - if: always() && hashFiles('headless-run.jsonl') != ''
+      - if: always() && steps.download.outcome == 'success'
         name: Merge the fixer's row into the run's headless-run artifact
         env:
           PREV: ${{ runner.temp }}/review-artifact
@@ -1540,7 +1566,7 @@ jobs:
           mkdir -p "$PREV"
           cat headless-run.jsonl >> "$PREV/headless-run.jsonl"
 
-      - if: always() && hashFiles('headless-run.jsonl') != ''
+      - if: always() && steps.download.outcome == 'success'
         uses: actions/upload-artifact@v7.0.2
         with:
           name: headless-run
