@@ -220,14 +220,16 @@ class Gate(unittest.TestCase):
         st = {t["thread_id"]: t["status"] for t in res["threads"]}
         self.assertEqual(st, {"T1": "left", "T2": "left", "T3": "fixed", "T4": "left"})
 
-    def test_a_declined_thread_reverts_the_suggestion_it_shares_a_file_with_when_touched(self):
-        r = Repo({"b.py": "1\n2\n3\n"})
-        r.plan([node(1, "b.py", 1, fence("ONE\n")), node(2, "b.py", 3, "🤖 [nit] [easy] t2")])
-        r.write("b.py", "ONE\n2\nhalf\n")
-        res = r.gate([])  # the agent died before answering
-        self.assertEqual(res["additions"], [])
-        self.assertEqual(r.read("b.py"), "1\n2\n3\n")
-        self.assertEqual([t["status"] for t in res["threads"]], ["not-taken", "left"])
+    def test_an_undone_agent_edit_keeps_the_suggestion_on_the_same_file(self):
+        r = Repo({"b.py": "1\n2\n3\n4\n"})
+        r.plan([node(1, "b.py", 1, fence("ONE\n")), node(2, "b.py", 3, "🤖 [nit] [easy] t2"),
+                node(3, "b.py", 4, "🤖 [nit] [easy] t3")])
+        r.write("b.py", "ONE\n2\nhalf\nFOUR\n")
+        res = r.gate([{"thread_id": "T3", "done": True}])  # T2 never answered
+        self.assertEqual(r.read("b.py"), "ONE\n2\n3\n4\n")
+        self.assertEqual([base64.b64decode(a["contents"]).decode() for a in res["additions"]],
+                         ["ONE\n2\n3\n4\n"])
+        self.assertEqual([t["status"] for t in res["threads"]], ["fixed", "left", "left"])
 
     def test_an_edit_through_a_symlink_is_reverted_at_commit(self):
         r = Repo({"docs/a.md": "1\n", "hooks/y.py": "1\n"})

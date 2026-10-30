@@ -9,8 +9,9 @@ where the tests reach it.
           the agent's line numbers moved past them; nothing on a head the
           fixer itself committed
   gate    after the agent: every changed tracked path not risky and named by a
-          taken thread is kept, every other one reverted, and so is a file the
-          agent edited while leaving one of its threads unfinished; the kept
+          taken thread is kept, every other one reverted; a file the agent
+          edited while leaving one of its threads unfinished goes back to how
+          the agent found it, suggestion fixes and all; the kept
           files become
           createCommitOnBranch additions
   report  the commit's sha (or why there is none) -> one reply per thread and
@@ -220,8 +221,12 @@ def plan(nodes, head, root, globs, head_message=""):
                 t.update(status="left", why=why)
             else:
                 # The file as the agent finds it, so the gate can tell
-                # whether the agent touched it.
+                # whether the agent touched it, and, where a suggestion
+                # changed it, undo the agent without undoing the suggestion.
                 t["base"] = digest(root, t["path"])
+                if replaced.get(t["path"]):
+                    t["base_contents"] = base64.b64encode(
+                        (Path(root) / t["path"]).read_bytes()).decode()
     return threads
 
 
@@ -248,11 +253,22 @@ def gate(threads, agent, root, globs):
     agent_threads = [t for t in threads if t.get("status") == "agent"]
     unfinished = {t["path"] for t in agent_threads
                   if answers.get(t["thread_id"], {}).get("done") is not True}
-    # A file the agent edited while leaving one of its threads unfinished is
-    # reverted whole: a half edit must not ride in on another thread's fix.
+    # A file the agent edited while leaving one of its threads unfinished
+    # loses all the agent's edits: a half edit must not ride in on another
+    # thread's fix.
     touched_unfinished = {p for p in unfinished
                           if any(t["path"] == p and t.get("base") != digest(root, p)
                                  for t in agent_threads)}
+    # Where a suggestion changed the file first, put back the file as the
+    # agent found it, so the suggestion fixes stay; elsewhere, back to HEAD.
+    undone = {}
+    for p in list(touched_unfinished):
+        snap = next((t["base_contents"] for t in agent_threads
+                     if t["path"] == p and t.get("base_contents")), None)
+        if snap is not None and not path_problem(root, p):
+            (Path(root) / p).write_bytes(base64.b64decode(snap))
+            undone[p] = "the agent edited it but left a thread on it unfinished, so its edit was undone"
+            touched_unfinished.discard(p)
     allowed = {t["path"] for t in threads if t.get("status") == "fixed"}
     allowed |= {t["path"] for t in agent_threads if t["path"] not in unfinished}
     kept, reverted = [], {}
@@ -282,6 +298,8 @@ def gate(threads, agent, root, globs):
                 t.update(status="left", why="the agent gave no answer for it")
             elif a.get("done") is not True:
                 t.update(status="left", why=str(a.get("why") or "the agent did not take it"))
+            elif t["path"] in undone:
+                t.update(status="left", why=f"the agent said done but {undone[t['path']]}")
             elif t["path"] in kept:
                 t.update(status="fixed", how="agent")
             else:
