@@ -108,6 +108,26 @@ class Plan(unittest.TestCase):
         self.assertEqual(r.read(".github/workflows/x.yml"), "a\n")
         self.assertEqual([t["status"] for t in res], ["not-taken", "not-taken"])
 
+    def test_a_path_that_could_forge_a_tool_grant_is_not_taken(self):
+        evil = "x),Bash(*"
+        r = Repo({evil: "1\n", "a b.txt": "1\n", "ok.txt": "1\n"})
+        res = r.plan([node(1, evil, 1, "🤖 [nit] [easy] x"),
+                      node(2, "a b.txt", 1, fence("2\n")),
+                      node(3, "../ok.txt", 1, "🤖 [nit] [easy] x")])
+        self.assertEqual([t["status"] for t in res], ["not-taken"] * 3)
+        self.assertTrue(all("characters" in t["why"] for t in res))
+        self.assertEqual(r.read("a b.txt"), "1\n")
+
+    def test_a_symlink_into_a_risky_dir_is_not_taken(self):
+        r = Repo({"hooks/y.py": "1\n", "docs/real.md": "1\n"})
+        os.symlink("../hooks/y.py", Path(r.root, "docs/x"))
+        os.symlink("../hooks", Path(r.root, "docs/d"))
+        subprocess.run(["git", "-C", r.root, "add", "docs/x", "docs/d"], check=True)
+        res = r.plan([node(1, "docs/x", 1, fence("evil\n")),
+                      node(2, "docs/d/y.py", 1, "🤖 [nit] [easy] x")])
+        self.assertEqual([t["status"] for t in res], ["not-taken", "not-taken"])
+        self.assertEqual(r.read("hooks/y.py"), "1\n")
+
     def test_only_this_heads_open_unanswered_easy_bot_threads(self):
         r = Repo({"a.txt": "1\n"})
         res = r.plan([
@@ -150,6 +170,19 @@ class Gate(unittest.TestCase):
         self.assertEqual(st["T1"][0], "fixed")
         self.assertEqual(st["T2"][0], "fixed")
         self.assertEqual(st["T3"], ("left", "ambiguous"))
+
+    def test_an_edit_through_a_symlink_is_reverted_at_commit(self):
+        r = Repo({"docs/a.md": "1\n", "hooks/y.py": "1\n"})
+        os.symlink("../hooks/y.py", Path(r.root, "docs/link"))
+        subprocess.run(["git", "-C", r.root, "add", "docs/link"], check=True)
+        subprocess.run(["git", "-C", r.root, "-c", "user.name=t", "-c", "user.email=t@t",
+                        "-c", "commit.gpgsign=false", "commit", "-qm", "link"], check=True)
+        r.plan([node(1, "docs/a.md", 1, "🤖 [nit] [easy] x")])
+        # The agent writes through the link: the risky target is reverted.
+        r.write("docs/link", "evil\n")
+        res = r.gate([{"thread_id": "T1", "done": True}])
+        self.assertEqual(res["additions"], [])
+        self.assertEqual(r.read("hooks/y.py"), "1\n")
 
     def test_missing_agent_file_leaves_agent_threads(self):
         r = Repo({"a.txt": "1\n"})

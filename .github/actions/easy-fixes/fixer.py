@@ -39,6 +39,34 @@ def is_risky(path, globs):
     return any(fnmatch.fnmatchcase(path, g) for g in globs)
 
 
+# A thread's path reaches the agent's --allowedTools, so only plain path
+# characters pass: a `,`, `(`, `)` or space could forge a tool grant.
+SAFE_PATH = re.compile(r"^[A-Za-z0-9._/-]+$")
+
+
+def path_problem(root, path):
+    """Why the fixer will not touch this path, or None. Checked before any
+    edit and again at commit: a symlink could carry an edit past the risky
+    class to wherever it points."""
+    if not SAFE_PATH.match(path) or path.startswith("/") or ".." in path.split("/"):
+        return "its path has characters the fixer does not pass on"
+    parts = path.split("/")
+    for i in range(1, len(parts) + 1):
+        if os.path.islink(os.path.join(root, *parts[:i])):
+            return "its path goes through a symlink"
+    real_root = os.path.realpath(root)
+    real = os.path.realpath(os.path.join(root, path))
+    if os.path.commonpath([real_root, real]) != real_root:
+        return "its path resolves outside the checkout"
+    try:
+        staged = git(root, "ls-files", "-s", "--", path).decode()
+    except subprocess.CalledProcessError:
+        staged = ""
+    if staged.startswith("120000 "):
+        return "its path is a symlink in git"
+    return None
+
+
 def suggestions(body):
     return [m.group(1) for m in FENCE.finditer(body)]
 
@@ -123,7 +151,10 @@ def plan(nodes, head, root, globs):
     for t in threads:
         fences = suggestions(t["body"])
         path = t["path"]
-        if path and is_risky(path, globs):
+        problem = path_problem(root, path) if path else None
+        if problem:
+            t.update(status="not-taken", why=problem)
+        elif path and is_risky(path, globs):
             t.update(status="not-taken", why=f"{path} is a risky path; the fixer never edits one")
         elif not fences:
             t.update(status="agent")
@@ -168,13 +199,14 @@ def gate(threads, agent, root, globs):
                 if t.get("status") == "agent" and answers.get(t["thread_id"], {}).get("done") is True}
     kept, reverted = [], {}
     for path, deleted in changed_tracked(root):
-        why = None
         if is_risky(path, globs):
             why = "risky path"
         elif path not in allowed:
             why = "no taken thread names this path"
         elif deleted:
             why = "a deletion"
+        else:
+            why = path_problem(root, path)
         if why:
             git(root, "checkout", "HEAD", "--", path)
             reverted[path] = why
