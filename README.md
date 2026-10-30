@@ -8,7 +8,7 @@ workflows; the substance lives here, once.
 |---|---|
 | `.mergify.yml` | `extends: .github` in the repository's `.mergify.yml` |
 | `.github/workflows/ci-gate.yml` | `uses: mark-brannan/.github/.github/workflows/ci-gate.yml@main` from a job named `ci-gate` |
-| `.github/workflows/claude-review.yml` | `uses: mark-brannan/.github/.github/workflows/claude-review.yml@main`; labels `review:skip` and `review:deep` override its triage; `fixer:skip` keeps the fixer job off a PR |
+| `.github/workflows/claude-review.yml` | `uses: mark-brannan/.github/.github/workflows/claude-review.yml@main`; labels `review:skip` and `review:deep` override its triage |
 | `.github/workflows/nonempty-diff.yml` | `uses: mark-brannan/.github/.github/workflows/nonempty-diff.yml@main`; fails an empty PR and any PR that adds a line starting with a tab; files exempt from the tab check are listed in `.github/config/no-tabs-allowlist.txt` |
 | `.github/workflows/pin-bump-alone.yml` | `uses: mark-brannan/.github/.github/workflows/pin-bump-alone.yml@main`; label `pin-bump-mixed-ok` lets it through |
 | `.github/workflows/complexity.yml` | `uses: mark-brannan/.github/.github/workflows/complexity.yml@main`, with `pull-requests: write`, outside `ci-gate`'s needs; posts each touched function's complexity change as a PR comment, never a gate |

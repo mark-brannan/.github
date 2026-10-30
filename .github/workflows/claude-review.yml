@@ -1330,7 +1330,7 @@ jobs:
           echo "FIXER_DIR=$RUNNER_TEMP/claude-fixer" >> "$GITHUB_ENV"
           # Read live, as triage does: a label added while the review ran counts.
           LABELS=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name] | join(" ")') \
-            || LABELS=$PAYLOAD_LABELS
+            || { echo "::warning::could not read the PR's labels live; using the event's"; LABELS=$PAYLOAD_LABELS; }
           if [ -n "$APP_ID" ] && [ -n "$APP_KEY" ]; then
             case " $LABELS " in
               *" fixer:skip "*)
