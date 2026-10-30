@@ -21,12 +21,13 @@ name: Claude PR Review
 #                    anything starts; a headless run cannot switch model.
 #   maxims-check     the software maxims the diff breaks (DRY, YAGNI, POLA
 #                    and their rivals). A table of findings with no verdict,
-#                    so it goes to the job summary where the owner reads it
-#                    at leisure, never to a thread a merge would wait on.
+#                    so it goes to the job summary and one top-level pull
+#                    request comment, never to a thread a merge would wait on.
 #   arete-check      what the change does to the people it touches, the good
 #                    it does and the good it diminishes. A brief, to the job
-#                    summary too, so the bot's comments on the pull request
-#                    stay a count of reviews.
+#                    summary and a top-level comment too. Each check's comment
+#                    carries a hidden marker, is edited in place on a re-run,
+#                    and is not counted by `max-reviews`.
 #
 # Every run that reviews runs all three: one triage, one fingerprint, one
 # budget probe decide for the chain, so what a check costs per pull request
@@ -440,9 +441,10 @@ jobs:
           LABELS=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name] | join(" ")') \
             || LABELS=$PAYLOAD_LABELS
           # The bot's comments on this PR: one per review run, plus any reply
-          # to an @claude mention, so the count errs toward fewer reviews.
+          # to an @claude mention, so the count errs toward fewer reviews. A check's
+          # brief comment (its hidden claude-review-check marker) is not a review.
           reviews=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
-                      --jq '.[] | select(.user.login == "claude[bot]") | .id' | wc -l) || reviews=unknown
+                      --jq '.[] | select(.user.login == "claude[bot]" and (.body | contains("<!-- claude-review-check:") | not)) | .id' | wc -l) || reviews=unknown
           mb=$(git merge-base "origin/$BASE" HEAD)
           # The risky class, one list for the tier and the follow-up rule:
           # the built-in globs, then the caller's `risky-paths`, each tried
@@ -1156,6 +1158,38 @@ jobs:
             echo "### Headless run cost: $WHAT"; echo '```json'; echo "$ROW"; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # The brief as one top-level pull request comment (never a review
+      # thread, so nothing waits on it), found by its hidden marker and edited
+      # in place on each run. Same body as the other check's but for its env,
+      # a DRY break declared like the summary steps': change one, change both.
+      # A token that cannot write (a fork) leaves the brief in the artifact.
+      - if: always() && steps.gate.outputs.checks == 'true' && steps.maxims.outputs.execution_file != ''
+        name: Post the maxims-check brief as a pull request comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MARKER: '<!-- claude-review-check:maxims-check -->'
+          TITLE: maxims-check
+          KEEP: .claude-maxims.md
+        run: |
+          if grep -q '^_check produced no output' "$KEEP"; then
+            echo "::notice::$TITLE produced no output; its comment, if any, is left as it was"
+            exit 0
+          fi
+          # GitHub caps a comment at 65536 characters.
+          body=$(jq -rn --rawfile brief "$KEEP" --arg marker "$MARKER" --arg title "$TITLE" --arg sha "$HEAD_SHA" \
+            '"\($marker)\n### \($title)\n\n\($brief[0:60000])\n\n<sub>head \($sha[0:8])</sub>"')
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                 --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\"))) | .id" | head -n 1) || id=
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" > /dev/null \
+              || echo "::warning::could not edit the $TITLE comment; the brief is in the headless-run artifact"
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -f body="$body" > /dev/null \
+              || echo "::warning::could not post the $TITLE comment; the brief is in the headless-run artifact"
+          fi
+
       # Which tool call or hook refused what (mark-brannan/.github#97); the
       # filter is DENIALS, in env:. Changes nothing. Same body as arete-check's
       # denial step but for its env, a DRY break declared like the summary
@@ -1255,6 +1289,38 @@ jobs:
             echo
             echo "### Headless run cost: $WHAT"; echo '```json'; echo "$ROW"; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # The brief as one top-level pull request comment (never a review
+      # thread, so nothing waits on it), found by its hidden marker and edited
+      # in place on each run. Same body as the other check's but for its env,
+      # a DRY break declared like the summary steps': change one, change both.
+      # A token that cannot write (a fork) leaves the brief in the artifact.
+      - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
+        name: Post the arete-check brief as a pull request comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MARKER: '<!-- claude-review-check:arete-check -->'
+          TITLE: arete-check
+          KEEP: .claude-arete.md
+        run: |
+          if grep -q '^_check produced no output' "$KEEP"; then
+            echo "::notice::$TITLE produced no output; its comment, if any, is left as it was"
+            exit 0
+          fi
+          # GitHub caps a comment at 65536 characters.
+          body=$(jq -rn --rawfile brief "$KEEP" --arg marker "$MARKER" --arg title "$TITLE" --arg sha "$HEAD_SHA" \
+            '"\($marker)\n### \($title)\n\n\($brief[0:60000])\n\n<sub>head \($sha[0:8])</sub>"')
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                 --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\"))) | .id" | head -n 1) || id=
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" > /dev/null \
+              || echo "::warning::could not edit the $TITLE comment; the brief is in the headless-run artifact"
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -f body="$body" > /dev/null \
+              || echo "::warning::could not post the $TITLE comment; the brief is in the headless-run artifact"
+          fi
 
       # Which tool call or hook refused what (mark-brannan/.github#97); the
       # filter is DENIALS, in env:. Changes nothing. Same body as maxims-check's
