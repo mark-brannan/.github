@@ -444,7 +444,7 @@ jobs:
           # to an @claude mention, so the count errs toward fewer reviews. A check's
           # brief comment (its hidden claude-review-check marker) is not a review.
           reviews=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
-                      --jq '.[] | select(.user.login == "claude[bot]" and (.body | contains("<!-- claude-review-check:") | not)) | .id' | wc -l) || reviews=unknown
+                      --jq '.[] | select(.user.login == "claude[bot]" and (.body | startswith("<!-- claude-review-check:") | not)) | .id' | wc -l) || reviews=unknown
           mb=$(git merge-base "origin/$BASE" HEAD)
           # The risky class, one list for the tier and the follow-up rule:
           # the built-in globs, then the caller's `risky-paths`, each tried
@@ -1162,7 +1162,7 @@ jobs:
       # thread, so nothing waits on it), found by its hidden marker and edited
       # in place on each run. Same body as the other check's but for its env,
       # a DRY break declared like the summary steps': change one, change both.
-      # A token that cannot write (a fork) leaves the brief in the artifact.
+      # A caller that grants no pull-requests: write leaves the brief in the artifact.
       - if: always() && steps.gate.outputs.checks == 'true' && steps.maxims.outputs.execution_file != ''
         name: Post the maxims-check brief as a pull request comment
         env:
@@ -1179,9 +1179,11 @@ jobs:
           fi
           # GitHub caps a comment at 65536 characters.
           body=$(jq -rn --rawfile brief "$KEEP" --arg marker "$MARKER" --arg title "$TITLE" --arg sha "$HEAD_SHA" \
-            '"\($marker)\n### \($title)\n\n\($brief[0:60000])\n\n<sub>head \($sha[0:8])</sub>"')
-          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
-                 --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\"))) | .id" | head -n 1) || id=
+            '"\($marker)\n### \($title)\n\n\($brief[0:60000] | gsub("(?<a>^|[^A-Za-z0-9_`/])@(?<n>[A-Za-z0-9])"; "\(.a)@\u200b\(.n)"))\n\n<sub>head \($sha[0:8])</sub>"')
+          ids=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                  --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\"))) | .id") \
+            || { echo "::warning::could not list comments; the $TITLE comment is left as it was"; exit 0; }
+          id=$(printf '%s\n' "$ids" | head -n 1)
           if [ -n "$id" ]; then
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" > /dev/null \
               || echo "::warning::could not edit the $TITLE comment; the brief is in the headless-run artifact"
@@ -1207,8 +1209,7 @@ jobs:
 
       # arete-check, on the model and effort its skill's "Run as" names,
       # headless and inline like maxims-check. Its brief goes to the job
-      # summary, not the pull request, so the bot's comments there stay one
-      # per review for the cap and the "review landed" check.
+      # summary and to the marker comment the post step below keeps.
       - if: "!cancelled() && steps.gate.outputs.checks == 'true'"
         id: arete
         uses: anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb # v1.0.263
@@ -1294,7 +1295,7 @@ jobs:
       # thread, so nothing waits on it), found by its hidden marker and edited
       # in place on each run. Same body as the other check's but for its env,
       # a DRY break declared like the summary steps': change one, change both.
-      # A token that cannot write (a fork) leaves the brief in the artifact.
+      # A caller that grants no pull-requests: write leaves the brief in the artifact.
       - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
         name: Post the arete-check brief as a pull request comment
         env:
@@ -1311,9 +1312,11 @@ jobs:
           fi
           # GitHub caps a comment at 65536 characters.
           body=$(jq -rn --rawfile brief "$KEEP" --arg marker "$MARKER" --arg title "$TITLE" --arg sha "$HEAD_SHA" \
-            '"\($marker)\n### \($title)\n\n\($brief[0:60000])\n\n<sub>head \($sha[0:8])</sub>"')
-          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
-                 --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\"))) | .id" | head -n 1) || id=
+            '"\($marker)\n### \($title)\n\n\($brief[0:60000] | gsub("(?<a>^|[^A-Za-z0-9_`/])@(?<n>[A-Za-z0-9])"; "\(.a)@\u200b\(.n)"))\n\n<sub>head \($sha[0:8])</sub>"')
+          ids=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                  --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\"))) | .id") \
+            || { echo "::warning::could not list comments; the $TITLE comment is left as it was"; exit 0; }
+          id=$(printf '%s\n' "$ids" | head -n 1)
           if [ -n "$id" ]; then
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" > /dev/null \
               || echo "::warning::could not edit the $TITLE comment; the brief is in the headless-run artifact"
