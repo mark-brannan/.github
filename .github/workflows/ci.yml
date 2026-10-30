@@ -77,6 +77,16 @@ jobs:
           persist-credentials: false
       - run: python3 .github/actions/headless-run-cost/action.test.py
 
+  # The claude-review fixer's script, on fixture threads in a temp git repo;
+  # no network; seconds.
+  easy-fixes-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: python3 .github/actions/easy-fixes/fixer.test.py
+
   # The workflow run on this repo's own PRs against the engine they carry. A
   # measurement, so it stays out of ci-gate's needs; ~10 s per push.
   complexity:
@@ -147,7 +157,7 @@ jobs:
   # The single required status check. `always()` lets it evaluate when a
   # dependency failed or was skipped instead of inheriting the skip.
   ci-gate:
-    needs: [nonempty, pr-title, secret-scan, complexity-tests, coverage-tests, headless-run-cost-tests, duplication-tests, golden-diff-tests, show-dont-tell-tests, review-metrics-tests]
+    needs: [nonempty, pr-title, secret-scan, complexity-tests, coverage-tests, headless-run-cost-tests, easy-fixes-tests, duplication-tests, golden-diff-tests, show-dont-tell-tests, review-metrics-tests]
     if: always()
     permissions: {}
     uses: ./.github/workflows/ci-gate.yml
