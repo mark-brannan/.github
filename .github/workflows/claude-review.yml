@@ -1295,14 +1295,16 @@ jobs:
   # not; none is resolved, that stays the author's.
   #
   # Runs only behind a review this run posted, and never on its own work: an
-  # App-token commit or update-branch fires `synchronize` (a `review:deep`
-  # label or `followup-risky-only: false` lets that review post again), so the
-  # job skips when the agent App sent the event, and plan takes nothing on a
-  # head whose message carries the fixer's `Claude-Fixer-Run:` trailer.
+  # App-token commit fires `synchronize` (a `review:deep` label or
+  # `followup-risky-only: false` lets that review post again), so plan takes
+  # nothing on a head whose message carries the fixer's `Claude-Fixer-Run:`
+  # trailer. The trailer, not the event's sender, is the guard: agent sessions
+  # open and push pull requests as the same App, and a sender test skipped
+  # every one of them (mark-brannan/claude#356).
   # An author who wants no commits from it labels the PR `fixer:skip`.
   fixer:
     needs: review
-    if: needs.review.outputs.posted == 'true' && github.event.sender.login != 'mark-brannan-agent[bot]'
+    if: needs.review.outputs.posted == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10  # stand-in until three runs are measured
     concurrency:
