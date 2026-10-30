@@ -89,3 +89,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261028t034334z
 - README coverage row keeps the clause that the tests job uploads a Cobertura coverage artifact, against the review's suggested cut, because the caller has to set it up Undo: drop the clause from README.md's coverage.yml row ([#102](https://github.com/mark-brannan/.github/pull/102))
+
+### 20261030t084931z
+- fixer skips threads with any reply fixer replies post with github.token, not the App fixer reply signature: claude-fixer · model · low · run id update-branch only after a fix commit fixer cost row merged into the run's headless-run artifact via overwrite create-github-app-token@v3 with app-id (deprecated) to match secret name fixer refuses only the risky class, not governing documents ([#106](https://github.com/mark-brannan/.github/pull/106))
