@@ -5,7 +5,7 @@
 //
 // Exits 1 (red) when a changed file matches `paths:` and the PR body carries
 // neither an image nor a preview URL, or when the opt-in file sets `serve:`
-// and the body has no "Try it" block naming this PR's head; 0 otherwise.
+// and the body has no "Try it" heading followed by the exact one-line paste; 0 otherwise.
 // Writes markdown to stdout.
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';

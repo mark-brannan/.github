@@ -130,6 +130,7 @@ test('scanTryIt: heading, then the exact line on a line of its own', () => {
   assert.ok(!scanTryIt('## Try it\n```bash\ngh pr checkout 221 && npm ci && npm run dev -- --port 10231\n```', LINE));
   assert.ok(!scanTryIt('## Try it\n```bash\nnpm run try-it -- 221\n```', LINE));
   assert.ok(!scanTryIt('## Try it\n' + LINE.replace('10221', '10231'), LINE));
+  assert.ok(!scanTryIt('## Try it\n\n    ' + LINE.split(' && ').join(' \\\n      && '), LINE));
   assert.ok(!scanTryIt('', LINE));
 });
 
