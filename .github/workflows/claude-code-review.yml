@@ -7,7 +7,9 @@ name: Claude PR Review
 # workflow holds the OAuth token, so a pull request must not be able to modify
 # the reviewer that reviews it: `@main` always runs the merged version.
 #
-# Auth: the CLAUDE_CODE_OAUTH_TOKEN secret. Dependabot-triggered runs get no
+# Auth: the CLAUDE_CODE_OAUTH_TOKEN secret, and AGENT_BOT_APP_ID and
+# AGENT_BOT_PRIVATE_KEY so the checks' reports are kept (the review fails
+# red without them). Dependabot-triggered runs get no
 # secrets, so the review skips with a warning there; that is intended and
 # saves tokens.
 
@@ -27,6 +29,8 @@ jobs:
     uses: mark-brannan/.github/.github/workflows/claude-review.yml@main
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      AGENT_BOT_APP_ID: ${{ secrets.AGENT_BOT_APP_ID }}
+      AGENT_BOT_PRIVATE_KEY: ${{ secrets.AGENT_BOT_PRIVATE_KEY }}
     with:
       prompt: |
         Review this pull request to mark-brannan/.github, the organisation's
