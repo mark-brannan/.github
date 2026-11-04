@@ -181,8 +181,9 @@ name: Claude PR Review
 # needs Contents: write; without the secrets it skips with a warning. A
 # `fixer:skip` label keeps it off one pull request. The same App keeps the
 # checks' full reports in the private state repository, so it needs
-# Contents: write there too; without the secrets, or without the App
-# installed there, the reports are not kept and the run says so.
+# Contents: write there too. Without the secrets the reports are not kept
+# and the run says so; with them, a report that cannot be pushed after three
+# tries fails the review job, so the run shows red and a re-run pushes it.
 
 on:
   workflow_call:
@@ -314,8 +315,9 @@ jobs:
     # The fixer runs only behind a review this run actually posted.
     outputs:
       posted: ${{ steps.posted.outputs.posted }}
-      # arete-check's reading on this run: true (not yet), false, or empty
-      # when it did not run or left no recommendation. Names the hold job.
+      # arete-check's reading on this run: true (not yet), false (meets the
+      # standard), broken (it ran and left no readable arete.json
+      # recommendation), or empty when it did not run. Names the hold job.
       hold: ${{ steps.verdict.outputs.hold }}
     # The seeded dotfiles hooks include a Stop hook that commits and pushes a
     # dirty Claude-made checkout as the session's salvaged work. On this
@@ -1058,26 +1060,6 @@ jobs:
           echo "posted=$([ "$n" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           [ "$n" -gt 0 ] || echo "::warning::no review comment posted; fingerprint not recorded"
 
-      - if: steps.gate.outputs.run == 'true' && steps.posted.outputs.posted == 'true'
-        name: Remember that this content was reviewed
-        run: echo "${{ steps.fp.outputs.id }}" > .claude-reviewed
-
-      - if: steps.gate.outputs.run == 'true' && steps.posted.outputs.posted == 'true'
-        uses: actions/cache/save@v6
-        with:
-          path: .claude-reviewed
-          key: claude-review-pr${{ github.event.pull_request.number }}-${{ steps.fp.outputs.id }}
-
-      - if: steps.gate.outputs.run == 'true' && steps.posted.outputs.posted == 'true'
-        name: Remember the head that was reviewed
-        run: echo "${{ github.event.pull_request.head.sha }}" > .claude-reviewed-head
-
-      - if: steps.gate.outputs.run == 'true' && steps.posted.outputs.posted == 'true'
-        uses: actions/cache/save@v6
-        with:
-          path: .claude-reviewed-head
-          key: claude-review-head-pr${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
-
       # The prompt of each check below never spells the pull request as a URL
       # or owner/repo#n. The seeded home's UserPromptSubmit hook
       # (pr-blockers-prompt.py) matches either form, runs pr-blockers on it
@@ -1296,7 +1278,8 @@ jobs:
           fi
 
       # continue-on-error: an App not installed on the state repository fails
-      # here, and that costs the kept reports, never the run.
+      # here, and the step below turns that into its own clear red, after
+      # the reports are written on the runner.
       - if: always() && steps.gate.outputs.checks == 'true' && steps.stateapp.outputs.ok == 'true'
         id: statetoken
         continue-on-error: true
@@ -1311,10 +1294,16 @@ jobs:
       # <head8>-<check>.md, through the contents API, so GitHub signs the
       # commit and nothing is cloned. A re-run on the same head with the same
       # text writes nothing. Outputs each kept path, for the pointer.
+      # A report is never lost: each push gets three tries, the report
+      # staying on the runner between them, and one that still fails (or has
+      # no token though the App secrets are set) fails this step red once
+      # both reports are tried, so a re-run pushes it. There is no public
+      # fallback.
       - if: always() && steps.gate.outputs.checks == 'true'
         name: Keep the full reports in the private state repository
         id: kept
         env:
+          APP_OK: ${{ steps.stateapp.outputs.ok }}
           STATE_TOKEN: ${{ steps.statetoken.outputs.token }}
           STATE_REPO: mark-brannan/claude_prompts_scratch
           PR: ${{ github.event.pull_request.number }}
@@ -1326,6 +1315,19 @@ jobs:
         run: |
           dir="$RUNNER_TEMP/claude-checks"
           base="state/global/review-metrics/reports/${GITHUB_REPOSITORY#*/}/pr-$PR"
+          failed=""
+          # One push of <check>'s report <file> to <path>: the file's sha is
+          # read afresh each try, so a try never reuses a stale one.
+          push_report() {
+            local have
+            have=$(GH_TOKEN="$STATE_TOKEN" gh api "repos/$STATE_REPO/contents/$3" --jq .sha 2>/dev/null) || have=""
+            if [ -n "$have" ] && [ "$have" = "$(git hash-object "$2")" ]; then return 0; fi
+            jq -n --rawfile body "$2" --arg sha "$have" \
+              --arg m "review-metrics: $1-check report for $GITHUB_REPOSITORY#$PR at ${HEAD_SHA:0:8}" \
+              '{message: $m, content: ($body | @base64)} + (if $sha == "" then {} else {sha: $sha} end)' > "$dir/$1.put.json" \
+              || return 1
+            GH_TOKEN="$STATE_TOKEN" gh api -X PUT "repos/$STATE_REPO/contents/$3" --input "$dir/$1.put.json" > /dev/null
+          }
           for c in maxims arete; do
             if [ "$c" = maxims ]; then exec=$MAXIMS_EXEC outcome=$MAXIMS_OUTCOME
             else exec=$ARETE_EXEC outcome=$ARETE_OUTCOME; fi
@@ -1341,47 +1343,59 @@ jobs:
               echo "_check produced no output (${outcome})_" > "$out"
               continue
             fi
+            if [ "$APP_OK" != true ]; then
+              echo "::notice::AGENT_BOT_APP_ID or AGENT_BOT_PRIVATE_KEY is not set; the $c-check report is not kept"
+              continue
+            fi
             if [ -z "$STATE_TOKEN" ]; then
-              echo "::notice::no token for $STATE_REPO (App secrets unset, or the App is not installed there); the $c-check report is not kept"
+              echo "::error::could not make a token for $STATE_REPO (is the agent App installed there?); the $c-check report was not pushed. Re-run this job to push it."
+              failed="$failed $c"
               continue
             fi
             path="$base/${HEAD_SHA:0:8}-$c.md"
-            have=$(GH_TOKEN="$STATE_TOKEN" gh api "repos/$STATE_REPO/contents/$path" --jq .sha 2>/dev/null) || have=""
-            if [ -n "$have" ] && [ "$have" = "$(git hash-object "$out")" ]; then
-              echo "$c=$path" >> "$GITHUB_OUTPUT"
-              continue
-            fi
-            jq -n --rawfile body "$out" --arg sha "$have" \
-              --arg m "review-metrics: $c-check report for $GITHUB_REPOSITORY#$PR at ${HEAD_SHA:0:8}" \
-              '{message: $m, content: ($body | @base64)} + (if $sha == "" then {} else {sha: $sha} end)' > "$dir/$c.put.json"
-            if GH_TOKEN="$STATE_TOKEN" gh api -X PUT "repos/$STATE_REPO/contents/$path" --input "$dir/$c.put.json" > /dev/null; then
+            pushed=false
+            for try in 1 2 3; do
+              if push_report "$c" "$out" "$path"; then pushed=true; break; fi
+              if [ "$try" -lt 3 ]; then
+                echo "::warning::push $try of 3 of the $c-check report to $STATE_REPO failed; trying again in $((try * 5))s"
+                sleep $((try * 5))
+              fi
+            done
+            if [ "$pushed" = true ]; then
               echo "$c=$path" >> "$GITHUB_OUTPUT"
               echo "kept $c-check's report at $STATE_REPO:$path"
             else
-              echo "::warning::could not write the $c-check report to $STATE_REPO; it is not kept this run"
+              echo "::error::could not push the $c-check report to $STATE_REPO:$path after 3 tries. Re-run this job to push it."
+              failed="$failed $c"
             fi
           done
+          if [ -n "$failed" ]; then
+            echo "::error::the full report of${failed} did not reach $STATE_REPO; this run is red until a re-run pushes it"
+            exit 1
+          fi
 
-      # arete-check's recommendation, from the JSON its prompt asks for. A
-      # missing or broken JSON falls back to the brief's "Recommendation:"
-      # line, so a "not yet" still holds when the agent skipped the file.
-      # hold is true, false, or empty when neither says.
+      # arete-check's recommendation, from the JSON its prompt asks for and
+      # nothing else. hold is true (not yet), false (meets the standard), or
+      # broken: the JSON is missing, unparseable, or has no recommendation
+      # read as one of those two. Broken fails closed: the arete-hold job
+      # goes red saying so, and a re-run reads it again.
       - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
         name: Read arete-check's recommendation
         id: verdict
         run: |
           dir="$RUNNER_TEMP/claude-checks"
-          rec=$(jq -r 'if type == "object" then (.recommendation // "") else "" end | tostring | ascii_downcase' "$dir/arete.json" 2>/dev/null) || rec=""
-          if [ -z "$rec" ] && [ -s "$dir/arete.md" ] && ! grep -q '^_check produced no output' "$dir/arete.md"; then
-            rec=$(grep -i -m1 -o 'recommendation:[*_ ]*[a-z ]*' "$dir/arete.md" | sed 's/^[^:]*:[*_ ]*//' | tr '[:upper:]' '[:lower:]') || rec=""
-          fi
+          rec=$(jq -er 'select(type == "object") | .recommendation | select(type == "string") | ascii_downcase | gsub("\\s+"; " ") | ltrimstr(" ") | .[0:80]' "$dir/arete.json" 2>/dev/null) || rec=""
           case "$rec" in
-            "not yet"*|"not at this time"*) hold=true ;;
-            "") hold="" ;;
-            *) hold=false ;;
+            "not yet"*) hold=true ;;
+            "meets the standard"*) hold=false ;;
+            *) hold=broken ;;
           esac
           echo "hold=$hold" >> "$GITHUB_OUTPUT"
-          echo "arete-check recommendation: ${rec:-none found}; hold: ${hold:-unknown}"
+          if [ "$hold" = broken ]; then
+            echo "::warning::arete-check's output was missing or broken: arete.json is absent, unparseable or has no readable recommendation (${rec:-none}); the arete-hold check fails until a run reads one"
+          else
+            echo "arete-check recommendation: $rec; hold: $hold"
+          fi
 
       # Each check's summary (the few lines its agent wrote beside the
       # report) in the job summary and as one top-level pull request comment
@@ -1404,6 +1418,8 @@ jobs:
           ARETE_RAN: ${{ steps.arete.outputs.execution_file != '' }}
           MAXIMS_KEPT: ${{ steps.kept.outputs.maxims }}
           ARETE_KEPT: ${{ steps.kept.outputs.arete }}
+          KEPT_OUTCOME: ${{ steps.kept.outcome }}
+          APP_OK: ${{ steps.stateapp.outputs.ok }}
           MAXIMS_ROW: ${{ steps.maxims-cost.outputs.row }}
           ARETE_ROW: ${{ steps.arete-cost.outputs.row }}
           HOLD: ${{ steps.verdict.outputs.hold }}
@@ -1422,12 +1438,18 @@ jobs:
             else summary="_$title wrote no summary; the full report has its findings_"; fi
             if [ -n "$kept" ]; then
               pointer="Full report (private): [\`$STATE_REPO:$kept\`](https://github.com/$STATE_REPO/blob/main/$kept)"
+            elif [ "$APP_OK" != true ]; then
+              pointer="Full report: not kept; this repository's caller passes no agent App secrets."
+            elif [ "$KEPT_OUTCOME" = failure ]; then
+              pointer="Full report: not yet pushed to the private repository; this run is red, and a re-run pushes it."
             else
-              pointer="Full report: not kept this run; the run's log says why."
+              pointer="Full report: none; the check produced no output."
             fi
             held=""
             if [ "$c" = arete ] && [ "$HOLD" = true ]; then
               held="**Held.** arete-check recommends not yet, so the \`arete-hold\` check fails and the \`merge\` label does not queue this pull request. It is released by an approving review from the owner and a re-run of that failed job, or by a later run that reads otherwise. Its line findings are on their lines."
+            elif [ "$c" = arete ] && [ "$HOLD" = broken ]; then
+              held="**Held.** arete-check's output was missing or broken this run (no readable recommendation), so the \`arete-hold\` check fails closed. This is not a not yet; re-run the failed jobs to read it again."
             fi
             {
               echo "### $title"; echo; echo "$summary"; echo
@@ -1445,9 +1467,10 @@ jobs:
               || { echo "::warning::could not list comments; the $title comment is left as it was"; continue; }
             id=$(printf '%s\n' "$found" | head -n 1 | cut -f1)
             was_held=$(printf '%s\n' "$found" | head -n 1 | cut -f2)
-            # A run that left no recommendation keeps the hold it found.
+            # A broken reading keeps the not-yet hold it found; its own red
+            # comes from this run's output, in the arete-hold job.
             mark=""
-            if [ "$c" = arete ] && { [ "$HOLD" = true ] || { [ -z "$HOLD" ] && [ "$was_held" = true ]; }; }; then
+            if [ "$c" = arete ] && { [ "$HOLD" = true ] || { [ "$HOLD" = broken ] && [ "$was_held" = true ]; }; }; then
               mark="$HOLD_MARKER"
             fi
             # GitHub caps a comment at 65536 characters; the summary is far below.
@@ -1505,6 +1528,31 @@ jobs:
                 || echo "::warning::could not comment on $where (not a line of the diff?)"
             done
 
+      # The content and head are recorded as reviewed only once the whole
+      # chain has landed: no step failed (a report that could not be pushed
+      # fails its step) and arete-check left a readable recommendation.
+      # Recorded earlier, a re-run of a red run would skip on the
+      # fingerprint and push nothing, read nothing.
+      - if: steps.gate.outputs.run == 'true' && steps.posted.outputs.posted == 'true' && steps.verdict.outputs.hold != 'broken'
+        name: Remember that this content was reviewed
+        run: echo "${{ steps.fp.outputs.id }}" > .claude-reviewed
+
+      - if: steps.gate.outputs.run == 'true' && steps.posted.outputs.posted == 'true' && steps.verdict.outputs.hold != 'broken'
+        uses: actions/cache/save@v6
+        with:
+          path: .claude-reviewed
+          key: claude-review-pr${{ github.event.pull_request.number }}-${{ steps.fp.outputs.id }}
+
+      - if: steps.gate.outputs.run == 'true' && steps.posted.outputs.posted == 'true' && steps.verdict.outputs.hold != 'broken'
+        name: Remember the head that was reviewed
+        run: echo "${{ github.event.pull_request.head.sha }}" > .claude-reviewed-head
+
+      - if: steps.gate.outputs.run == 'true' && steps.posted.outputs.posted == 'true' && steps.verdict.outputs.hold != 'broken'
+        uses: actions/cache/save@v6
+        with:
+          path: .claude-reviewed-head
+          key: claude-review-head-pr${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+
       - if: always() && hashFiles('headless-run.jsonl') != ''
         uses: actions/upload-artifact@v7.0.2
         with:
@@ -1527,10 +1575,14 @@ jobs:
   # that does not say "not yet" lifts it too, and one that says it again
   # holds afresh. A pull request its owner opened cannot take the owner's own
   # approval, so there the merge button is the release.
+  #
+  # A run whose arete-check left no readable recommendation fails closed
+  # here, saying its output was missing or broken (not "not yet"); no
+  # review releases that, a re-run that reads one does.
   arete-hold:
     needs: review
     if: always() && needs.review.result != 'skipped'
-    name: "${{ needs.review.outputs.hold == 'true' && 'held: arete-check says not yet' || 'arete-check hold' }}"
+    name: "${{ needs.review.outputs.hold == 'true' && 'held: arete-check says not yet' || needs.review.outputs.hold == 'broken' && 'held: arete-check output missing or broken' || 'arete-check hold' }}"
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions:
@@ -1542,7 +1594,12 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           MARKER: '<!-- claude-review-check:arete-check -->'
           HOLD_MARKER: '<!-- claude-review-hold:arete-check -->'
+          READING: ${{ needs.review.outputs.hold }}
         run: |
+          if [ "$READING" = broken ]; then
+            echo "::error::arete-check's output was missing or broken this run (arete.json absent, unparseable or without a readable recommendation). This is not a not yet. Re-run the failed jobs to read it again."
+            exit 1
+          fi
           # A lookup that fails holds: re-running the job is the way past it.
           found=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
                     --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\"))) | [.updated_at, (.body | contains(\"$HOLD_MARKER\"))] | @tsv") \
