@@ -929,7 +929,7 @@ jobs:
         id: review
         uses: anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb # v1.0.263
         # Strip the Anthropic and cloud credentials from every shell the
-        # agent starts, so no Bash call can read the OAuth token from its
+        # agent starts, so no Bash call finds the OAuth token in the shell's
         # own environment. The action turns this on only for
         # allowed_non_write_users; this workflow reads outsiders' text too.
         env:
@@ -1084,7 +1084,7 @@ jobs:
         id: maxims
         uses: anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb # v1.0.263
         # Strip the Anthropic and cloud credentials from every shell the
-        # agent starts, so no Bash call can read the OAuth token from its
+        # agent starts, so no Bash call finds the OAuth token in the shell's
         # own environment. The action turns this on only for
         # allowed_non_write_users; this workflow reads outsiders' text too.
         env:
@@ -1228,7 +1228,7 @@ jobs:
         id: arete
         uses: anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb # v1.0.263
         # Strip the Anthropic and cloud credentials from every shell the
-        # agent starts, so no Bash call can read the OAuth token from its
+        # agent starts, so no Bash call finds the OAuth token in the shell's
         # own environment. The action turns this on only for
         # allowed_non_write_users; this workflow reads outsiders' text too.
         env:
@@ -1490,7 +1490,7 @@ jobs:
         id: agent
         uses: anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb # v1.0.263
         # Strip the Anthropic and cloud credentials from every shell the
-        # agent starts, so no Bash call can read the OAuth token from its
+        # agent starts, so no Bash call finds the OAuth token in the shell's
         # own environment. The action turns this on only for
         # allowed_non_write_users; this workflow reads outsiders' text too.
         env:
