@@ -5,7 +5,7 @@
 //
 // Exits 1 (red) when a changed file matches `paths:` and the PR body carries
 // neither an image nor a preview URL, or when the opt-in file sets `serve:`
-// and the body has no "Try it" block naming this PR's head; 0 otherwise.
+// and the body has no "Try it" heading followed by the exact one-line paste; 0 otherwise.
 // Writes markdown to stdout.
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -80,23 +80,35 @@ export function scanBody(body, urls = []) {
   return hit ? { kind: 'url', found: hit } : { kind: null, found: '' };
 }
 
-// The "Try it" block every PR of a repo with `serve:` carries: one paste that
-// fetches the PR head onto refs/pr/N (never a branch, so a second paste cannot
-// hit "refusing to fetch into checked-out branch"), adds or moves a detached
-// worktree, installs and serves on port 10000 + PR number.
-export function tryItBlock({ repo, pr, head, checkout, install, serve }) {
+// The one line every PR of a repo with `serve:` carries under "Try it": one
+// paste, on one line (a terminal or chat client that runs a single line runs
+// this one), that fetches the PR head onto refs/pr/N (never a branch, so a
+// second paste cannot hit "refusing to fetch into checked-out branch"), adds
+// or moves a detached worktree, installs and serves on port 10000 + PR number.
+// The check asks for this exact line, so a hand-written variant (a wrong port,
+// `gh pr checkout` in the main clone, a command that only prints this one) is red.
+export function tryItLine({ pr, checkout, install, serve }) {
   const port = 10000 + Number(pr);
   const wt = `${checkout}/.claude/worktrees/pr-${pr}`;
-  const cmd = serve.replaceAll('{port}', String(port));
-  const run = [install, cmd].filter(Boolean).join(' && ');
+  return [
+    `git -C ${checkout} fetch origin +pull/${pr}/head:refs/pr/${pr}`,
+    `{ [ -d ${wt} ] || git -C ${checkout} worktree add --detach ${wt} refs/pr/${pr}; }`,
+    `git -C ${wt} checkout -q --detach refs/pr/${pr}`,
+    `cd ${wt}`,
+    install,
+    serve.replaceAll('{port}', String(port)),
+  ].filter(Boolean).join(' && ');
+}
+
+export function tryItBlock({ pr, head, checkout, install, serve }) {
+  const port = 10000 + Number(pr);
+  const wt = `${checkout}/.claude/worktrees/pr-${pr}`;
   return [
     '## Try it',
     '',
-    `    git -C ${checkout} fetch origin +pull/${pr}/head:refs/pr/${pr} \\`,
-    `      && { [ -d ${wt} ] || git -C ${checkout} worktree add --detach ${wt} refs/pr/${pr}; } \\`,
-    `      && git -C ${wt} checkout -q --detach refs/pr/${pr} \\`,
-    `      && cd ${wt} \\`,
-    `      && ${run}`,
+    '```bash',
+    tryItLine({ pr, checkout, install, serve }),
+    '```',
     '',
     `Serves PR #${pr} (head ${String(head).slice(0, 7)} when this was written) on http://localhost:${port} from`,
     'its own worktree. Paste again after a push to the PR: it fetches and moves the',
@@ -105,18 +117,19 @@ export function tryItBlock({ repo, pr, head, checkout, install, serve }) {
   ].join('\n');
 }
 
-// Does the body carry a "Try it" heading followed by text naming this PR's
-// head ref? Fences are not stripped: the command is the deliverable.
-export function scanTryIt(body, pr) {
-  const m = /^#{1,6}\s*Try it\b/m.exec(body || '');
-  return !!m && (body || '').slice(m.index + m[0].length).includes(`pull/${pr}/head`);
+// Does the body carry a "Try it" heading followed by the exact line, on a
+// line of its own? Fences are not stripped: the command is the deliverable.
+export function scanTryIt(body, line) {
+  const text = (body || '').replace(/\r\n/g, '\n');
+  const m = /^#{1,6}\s*Try it\b/m.exec(text);
+  return !!m && text.slice(m.index + m[0].length).split('\n').some((l) => l.trim() === line);
 }
 
 export function report({ matched, shown, urls, serve = '', tryIt = true, block = '' }) {
   if (!matched.length) return { ok: true, md: '### show-dont-tell\n\nNo rendered path touched: nothing to show.\n' };
   const list = matched.slice(0, 20).map((f) => `- \`${f}\``).join('\n') + (matched.length > 20 ? `\n- ... and ${matched.length - 20} more` : '');
   const tryItRed = serve && !tryIt;
-  const tryItMsg = tryItRed ? `This repository declares a \`serve:\` command, so the description must also carry a "Try it" block: a \`## Try it\` heading followed by a command containing \`pull/N/head\` for this pull request, so the reviewer can run the page in one paste. Add this to the description (the check re-runs when it is edited):\n\n\`\`\`\`markdown\n${block}\`\`\`\`\n` : '';
+  const tryItMsg = tryItRed ? `This repository declares a \`serve:\` command, so the description must also carry a "Try it" block: a \`## Try it\` heading followed by exactly the line below, on a line of its own, so the reviewer can run the page in one paste. A hand-written variant is red: copy the block as it stands. Add this to the description (the check re-runs when it is edited):\n\n\`\`\`\`markdown\n${block}\`\`\`\`\n` : '';
   const kind = shown.kind === 'image' ? 'an image' : 'a preview URL';
   // `why` is the one-line reason for the red, for the ::error:: annotation.
   if (shown.kind && tryItRed) return { ok: false, why: 'has no "Try it" block', md: `### show-dont-tell: red\n\nThis pull request touches rendered paths:\n\n${list}\n\nThe body shows ${kind}, but has no "Try it" block.\n\n${tryItMsg}` };
@@ -157,11 +170,9 @@ function main() {
   const pull = matched.length ? JSON.parse(gh('api', `repos/${REPO}/pulls/${PR}`)) : {};
   const body = pull.body || '';
   const serve = cfg.serve || '';
-  const tryIt = !serve || !matched.length || scanTryIt(body, PR);
-  let block = '';
-  if (serve && matched.length && !tryIt) {
-    block = tryItBlock({ repo: REPO, pr: PR, head: pull.head.sha, checkout: cfg.checkout || '~/' + String(REPO).split('/').pop(), install: cfg.install || '', serve });
-  }
+  const args = { pr: PR, head: pull.head?.sha, checkout: cfg.checkout || '~/' + String(REPO).split('/').pop(), install: cfg.install || '', serve };
+  const tryIt = !serve || !matched.length || scanTryIt(body, tryItLine(args));
+  const block = serve && matched.length && !tryIt ? tryItBlock(args) : '';
   const r = report({ matched, shown: scanBody(body, cfg.urls), urls: cfg.urls, serve, tryIt, block });
   console.log(r.md);
   if (!r.ok) console.error(`::error::show-dont-tell: rendered paths touched, but the PR description ${r.why}.`);

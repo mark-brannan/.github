@@ -1,7 +1,7 @@
 // Tests for show-dont-tell.mjs. Run: node --test .github/scripts/show-dont-tell.test.mjs
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { globToRegExp, matchPaths, parseConfig, report, scanBody, scanTryIt, tryItBlock } from './show-dont-tell.mjs';
+import { globToRegExp, matchPaths, parseConfig, report, scanBody, scanTryIt, tryItBlock, tryItLine } from './show-dont-tell.mjs';
 
 test('globs: ** crosses directories, * and ? do not', () => {
   const m = (g, p) => globToRegExp(g).test(p);
@@ -92,15 +92,20 @@ test('parseConfig reads checkout, install, serve; lists still work', () => {
 
 const ARGS = { repo: 'mark-brannan/searoom', pr: 221, head: '5c8568cdeadbeef', checkout: '~/searoom', install: 'npm ci', serve: 'npm run dev -- --strictPort --port {port}' };
 
+const LINE = 'git -C ~/searoom fetch origin +pull/221/head:refs/pr/221 && { [ -d ~/searoom/.claude/worktrees/pr-221 ] || git -C ~/searoom worktree add --detach ~/searoom/.claude/worktrees/pr-221 refs/pr/221; } && git -C ~/searoom/.claude/worktrees/pr-221 checkout -q --detach refs/pr/221 && cd ~/searoom/.claude/worktrees/pr-221 && npm ci && npm run dev -- --strictPort --port 10221';
+
+test('tryItLine is the one-line paste, exactly', () => {
+  assert.equal(tryItLine(ARGS), LINE);
+  assert.doesNotMatch(LINE, /\n/);
+});
+
 test('tryItBlock renders the spec block exactly', () => {
   const want = [
     '## Try it',
     '',
-    '    git -C ~/searoom fetch origin +pull/221/head:refs/pr/221 \\',
-    '      && { [ -d ~/searoom/.claude/worktrees/pr-221 ] || git -C ~/searoom worktree add --detach ~/searoom/.claude/worktrees/pr-221 refs/pr/221; } \\',
-    '      && git -C ~/searoom/.claude/worktrees/pr-221 checkout -q --detach refs/pr/221 \\',
-    '      && cd ~/searoom/.claude/worktrees/pr-221 \\',
-    '      && npm ci && npm run dev -- --strictPort --port 10221',
+    '```bash',
+    LINE,
+    '```',
     '',
     'Serves PR #221 (head 5c8568c when this was written) on http://localhost:10221 from',
     'its own worktree. Paste again after a push to the PR: it fetches and moves the',
@@ -110,19 +115,23 @@ test('tryItBlock renders the spec block exactly', () => {
   assert.equal(tryItBlock(ARGS), want);
 });
 
-test('tryItBlock omits install when empty and replaces every {port}', () => {
-  const b = tryItBlock({ ...ARGS, install: '', serve: 'npx serve -l {port} --x {port}' });
-  assert.match(b, /\n      && npx serve -l 10221 --x 10221\n/);
-  assert.doesNotMatch(b, /npm ci/);
+test('tryItLine omits install when empty and replaces every {port}', () => {
+  const l = tryItLine({ ...ARGS, install: '', serve: 'npx serve -l {port} --x {port}' });
+  assert.match(l, /pr-221 && npx serve -l 10221 --x 10221$/);
+  assert.doesNotMatch(l, /npm ci/);
 });
 
-test('scanTryIt: heading plus pull/N/head after it, fences not stripped', () => {
-  assert.ok(scanTryIt(tryItBlock(ARGS), 221));
-  assert.ok(!scanTryIt(tryItBlock(ARGS), 22));
-  assert.ok(!scanTryIt('no heading, pull/221/head', 221));
-  assert.ok(!scanTryIt('pull/221/head\n\n## Try it\nnothing after', 221));
-  assert.ok(scanTryIt('### try it'.replace('t', 'T') + '\n```\ngit fetch +pull/7/head\n```', 7));
-  assert.ok(!scanTryIt('', 1));
+test('scanTryIt: heading, then the exact line on a line of its own', () => {
+  assert.ok(scanTryIt(tryItBlock(ARGS), LINE));
+  assert.ok(scanTryIt(tryItBlock(ARGS).replace(/\n/g, '\r\n'), LINE));
+  assert.ok(!scanTryIt(tryItBlock({ ...ARGS, pr: 22 }), LINE));
+  assert.ok(!scanTryIt('no heading\n' + LINE, LINE));
+  assert.ok(!scanTryIt(LINE + '\n\n## Try it\nnothing after', LINE));
+  assert.ok(!scanTryIt('## Try it\n```bash\ngh pr checkout 221 && npm ci && npm run dev -- --port 10231\n```', LINE));
+  assert.ok(!scanTryIt('## Try it\n```bash\nnpm run try-it -- 221\n```', LINE));
+  assert.ok(!scanTryIt('## Try it\n' + LINE.replace('10221', '10231'), LINE));
+  assert.ok(!scanTryIt('## Try it\n\n    ' + LINE.split(' && ').join(' \\\n      && '), LINE));
+  assert.ok(!scanTryIt('', LINE));
 });
 
 test('report: with serve, red without a Try it block even when shown; green with it', () => {
