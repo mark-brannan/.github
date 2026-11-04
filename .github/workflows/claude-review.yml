@@ -181,9 +181,9 @@ name: Claude PR Review
 # needs Contents: write; without the secrets it skips with a warning. A
 # `fixer:skip` label keeps it off one pull request. The same App keeps the
 # checks' full reports in the private state repository, so it needs
-# Contents: write there too. Without the secrets the reports are not kept
-# and the run says so; with them, a report that cannot be pushed after three
-# tries fails the review job, so the run shows red and a re-run pushes it.
+# Contents: write there too. A report is never silently lost: without the
+# secrets, or when a report cannot be pushed after three tries, the review
+# job fails red, saying which, and a re-run (with the secrets passed) pushes it.
 
 on:
   workflow_call:
@@ -1274,7 +1274,7 @@ jobs:
             echo "ok=true" >> "$GITHUB_OUTPUT"
           else
             echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::AGENT_BOT_APP_ID or AGENT_BOT_PRIVATE_KEY is not set; the checks' full reports are not kept this run"
+            echo "::warning::AGENT_BOT_APP_ID or AGENT_BOT_PRIVATE_KEY is not set; the report-keeping step fails below"
           fi
 
       # continue-on-error: an App not installed on the state repository fails
@@ -1295,8 +1295,8 @@ jobs:
       # commit and nothing is cloned. A re-run on the same head with the same
       # text writes nothing. Outputs each kept path, for the pointer.
       # A report is never lost: each push gets three tries, the report
-      # staying on the runner between them, and one that still fails (or has
-      # no token though the App secrets are set) fails this step red once
+      # staying on the runner between them, and one that still fails, has no
+      # token, or has no App secrets to make one fails this step red once
       # both reports are tried, so a re-run pushes it. There is no public
       # fallback.
       - if: always() && steps.gate.outputs.checks == 'true'
@@ -1344,7 +1344,8 @@ jobs:
               continue
             fi
             if [ "$APP_OK" != true ]; then
-              echo "::notice::AGENT_BOT_APP_ID or AGENT_BOT_PRIVATE_KEY is not set; the $c-check report is not kept"
+              echo "::error::the caller must pass AGENT_BOT_APP_ID and AGENT_BOT_PRIVATE_KEY as secrets so the $c-check report is kept in $STATE_REPO; it was not pushed. Pass them and re-run this job."
+              failed="$failed $c"
               continue
             fi
             if [ -z "$STATE_TOKEN" ]; then
@@ -1439,7 +1440,7 @@ jobs:
             if [ -n "$kept" ]; then
               pointer="Full report (private): [\`$STATE_REPO:$kept\`](https://github.com/$STATE_REPO/blob/main/$kept)"
             elif [ "$APP_OK" != true ]; then
-              pointer="Full report: not kept; this repository's caller passes no agent App secrets."
+              pointer="Full report: not yet kept; this repository's caller passes no agent App secrets, so this run is red until it passes them and re-runs."
             elif [ "$KEPT_OUTCOME" = failure ]; then
               pointer="Full report: not yet pushed to the private repository; this run is red, and a re-run pushes it."
             else
