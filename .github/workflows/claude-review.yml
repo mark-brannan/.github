@@ -2,10 +2,14 @@ name: Claude PR Review
 
 # An independent reviewer for every pull request, shared by every repository:
 # a fresh Claude with no shared context with whichever session wrote the
-# change. Advisory only -- it posts findings, it does not block the merge, and
-# no ruleset requires it. A model's opinion should not be able to stop a
-# merge, and a required check that depends on a token would fail closed the
-# day the token expires.
+# change. Advisory, with one hold -- it posts findings, and no ruleset
+# requires any of it. A model's opinion should not be able to stop a merge on
+# its own, and a required check that depends on a token would fail closed the
+# day the token expires. The one exception is arete-check's "not yet": the
+# `arete-hold` job goes red, which keeps Mergify's `merge` label from queueing
+# the pull request (its rule wants no failing check) until the owner releases
+# it (see that job). The merge button, which the rulesets gate on
+# `ci-gate / gate` alone, stays the owner's.
 #
 # The review job: a chain of checks behind one triage. Each check is its own
 # headless Claude with its own brief and model, run from the skills in the
@@ -20,14 +24,20 @@ name: Claude PR Review
 #                    picks the family from the Co-Authored-By trailers before
 #                    anything starts; a headless run cannot switch model.
 #   maxims-check     the software maxims the diff breaks (DRY, YAGNI, POLA
-#                    and their rivals). A table of findings with no verdict,
-#                    so it goes to the job summary and one top-level pull
-#                    request comment, never to a thread a merge would wait on.
+#                    and their rivals). A table of findings with no verdict.
 #   arete-check      what the change does to the people it touches, the good
-#                    it does and the good it diminishes. A brief, to the job
-#                    summary and a top-level comment too. Each check's comment
-#                    carries a hidden marker, is edited in place on a re-run,
-#                    and is not counted by `max-reviews`.
+#                    it does and the good it diminishes. A brief ending in a
+#                    recommendation; "not yet" holds the pull request and puts
+#                    the brief's line findings on their lines as comments.
+#
+# Neither check's full report is ever public: each goes to the private state
+# repository (mark-brannan/claude_prompts_scratch, under
+# state/global/review-metrics/reports/), pushed by a plain step with a token
+# made for that repository after the agents have finished. What is public is
+# a few-line summary the agent writes beside its report, in the job summary
+# and in one top-level comment per check that points at the full report.
+# Each comment carries a hidden marker, is edited in place on a re-run, and
+# is not counted by `max-reviews`.
 #
 # Every run that reviews runs all three: one triage, one fingerprint, one
 # budget probe decide for the chain, so what a check costs per pull request
@@ -35,10 +45,10 @@ name: Claude PR Review
 # numbers later.
 #
 # Each check leaves one cost row (the headless-run-cost action writes it), appended to headless-run.jsonl and uploaded
-# as the `headless-run` artifact (with the maxims table and arete brief as
-# .claude-maxims.md and .claude-arete.md; each check writes its file under
-# $RUNNER_TEMP, outside the checkout the seeded guards protect, and a step
-# copies it in), with the same rows in the job summary
+# as the `headless-run` artifact (the cost rows only: an artifact of a public
+# repository is public too, so the reports are not in it; each check writes
+# its files under $RUNNER_TEMP, outside the checkout the seeded guards
+# protect), with the same rows in the job summary
 # and a "what denied its calls" section per check naming each refused tool
 # call or hook. The
 # shape is stable, for readers that gather the artifacts across repositories;
@@ -169,7 +179,10 @@ name: Claude PR Review
 # [easy] findings and commits them as the agent App (see the job). It needs
 # AGENT_BOT_APP_ID and AGENT_BOT_PRIVATE_KEY passed as secrets, and the App
 # needs Contents: write; without the secrets it skips with a warning. A
-# `fixer:skip` label keeps it off one pull request.
+# `fixer:skip` label keeps it off one pull request. The same App keeps the
+# checks' full reports in the private state repository, so it needs
+# Contents: write there too; without the secrets, or without the App
+# installed there, the reports are not kept and the run says so.
 
 on:
   workflow_call:
@@ -301,6 +314,9 @@ jobs:
     # The fixer runs only behind a review this run actually posted.
     outputs:
       posted: ${{ steps.posted.outputs.posted }}
+      # arete-check's reading on this run: true (not yet), false, or empty
+      # when it did not run or left no recommendation. Names the hold job.
+      hold: ${{ steps.verdict.outputs.hold }}
     # The seeded dotfiles hooks include a Stop hook that commits and pushes a
     # dirty Claude-made checkout as the session's salvaged work. On this
     # runner that checkout is dirty by construction -- claude-code-action
@@ -1077,9 +1093,9 @@ jobs:
 
       # maxims-check, on the model and effort its skill's "Run as" names.
       # Headless, so inline rather than in the sub-agent the skill expects;
-      # read-only but for one file it writes its table to, which the next
-      # step moves into the job summary. Runs whether or not the review
-      # landed: the two are independent readings of the same diff.
+      # read-only but for the table and its summary, which the steps after
+      # arete-check keep and post. Runs whether or not the review landed:
+      # the two are independent readings of the same diff.
       - if: "!cancelled() && steps.gate.outputs.checks == 'true'"
         id: maxims
         uses: anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb # v1.0.263
@@ -1109,8 +1125,15 @@ jobs:
 
             The table is the whole output. Write it, as markdown, to
             ${{ runner.temp }}/claude-checks/maxims.md with the Write tool,
-            and nothing else there; a later step puts that file in the job
-            summary. Write it by that absolute path, outside the checkout.
+            and nothing else there; a later step keeps that file in a
+            private repository. Then write a summary of it, for the public
+            pull request, to
+            ${{ runner.temp }}/claude-checks/maxims-summary.md: line 1 is
+            "N breaks, M undeclared." with the table's row counts (the
+            count is this caller's, not the skill's); then one line per
+            undeclared break, "- maxim, path:line: the break in under
+            fifteen words"; nothing else. Write both by those absolute
+            paths, outside the checkout.
             Post nothing on the pull request -- no comment, no review, no
             thread -- and edit no other file. Do not read the pull request's
             review threads or comments, and ignore any "action items" a hook
@@ -1120,7 +1143,10 @@ jobs:
           # One / would mean relative to the project root and match nothing
           # (mark-brannan/.github#97). Comments cannot go inside the block.
           # --permission-mode default: see the review step.
+          # The first --allowedTools grants the summary files; the action
+          # joins every --allowedTools it is given.
           claude_args: |
+            --allowedTools "Edit(/${{ runner.temp }}/claude-checks/maxims-summary.md)"
             --model claude-sonnet-5-5 --effort medium
             --permission-mode default
             --allowedTools "Skill,Read(./**),Read(~/.claude/**),Read(/${{ runner.temp }}/claude-checks/**),Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Edit(/${{ runner.temp }}/claude-checks/maxims.md)"
@@ -1139,77 +1165,11 @@ jobs:
           fields: '{"head_sha":"${{ github.event.pull_request.head.sha }}","tier":"${{ steps.triage.outputs.decision }}"}'
           summary: 'false'
 
-      # This summary step and arete-check's are the same body but for their
-      # env: a declared DRY break. A reusable workflow runs in the caller's
-      # checkout, so a shared script here would not be there to call. Change
-      # one, change both.
-      - if: always() && steps.gate.outputs.checks == 'true' && steps.maxims.outputs.execution_file != ''
-        name: Put the maxims table in the job summary
-        env:
-          EXEC: ${{ steps.maxims.outputs.execution_file }}
-          WHAT: claude-maxims
-          OUT: ${{ runner.temp }}/claude-checks/maxims.md
-          KEEP: .claude-maxims.md
-          TITLE: maxims-check
-          OUTCOME: ${{ steps.maxims-cost.outputs.outcome }}
-          ROW: ${{ steps.maxims-cost.outputs.row }}
-        run: |
-          # The file the check wrote; its final message when it wrote none
-          # and the run succeeded. An error's text (a usage limit, a crash) is
-          # never taken for the check's output.
-          mkdir -p "$(dirname "$OUT")"
-          if [ ! -s "$OUT" ] && [ "$OUTCOME" = success ]; then
-            jq -r '[.[] | select(.type == "result")] | last | .result // empty' "$EXEC" > "$OUT"
-          fi
-          [ -s "$OUT" ] || echo "_check produced no output (${OUTCOME})_" > "$OUT"
-          # Into the workspace, where the artifact step reads it.
-          cp "$OUT" "$KEEP"
-          {
-            echo "### $TITLE"
-            echo
-            cat "$OUT"
-            echo
-            echo "### Headless run cost: $WHAT"; echo '```json'; echo "$ROW"; echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # The brief as one top-level pull request comment (never a review
-      # thread, so nothing waits on it), found by its hidden marker and edited
-      # in place on each run. Same body as the other check's but for its env,
-      # a DRY break declared like the summary steps': change one, change both.
-      # A caller that grants no pull-requests: write leaves the brief in the artifact.
-      - if: always() && steps.gate.outputs.checks == 'true' && steps.maxims.outputs.execution_file != ''
-        name: Post the maxims-check brief as a pull request comment
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          MARKER: '<!-- claude-review-check:maxims-check -->'
-          TITLE: maxims-check
-          KEEP: .claude-maxims.md
-        run: |
-          if grep -q '^_check produced no output' "$KEEP"; then
-            echo "::notice::$TITLE produced no output; its comment, if any, is left as it was"
-            exit 0
-          fi
-          # GitHub caps a comment at 65536 characters.
-          body=$(jq -rn --rawfile brief "$KEEP" --arg marker "$MARKER" --arg title "$TITLE" --arg sha "$HEAD_SHA" \
-            '"\($marker)\n### \($title)\n\n\($brief[0:60000] | gsub("(?<a>^|[^A-Za-z0-9_`/])@(?<n>[A-Za-z0-9])"; "\(.a)@\u200b\(.n)"))\n\n<sub>head \($sha[0:8])</sub>"')
-          ids=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
-                  --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\"))) | .id") \
-            || { echo "::warning::could not list comments; the $TITLE comment is left as it was"; exit 0; }
-          id=$(printf '%s\n' "$ids" | head -n 1)
-          if [ -n "$id" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" > /dev/null \
-              || echo "::warning::could not edit the $TITLE comment; the brief is in the headless-run artifact"
-          else
-            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -f body="$body" > /dev/null \
-              || echo "::warning::could not post the $TITLE comment; the brief is in the headless-run artifact"
-          fi
-
       # Which tool call or hook refused what (mark-brannan/.github#97); the
       # filter is DENIALS, in env:. Changes nothing. Same body as arete-check's
-      # denial step but for its env, a DRY break declared like the summary
-      # steps': change one, change both.
+      # denial step but for its env, a declared DRY break: a reusable workflow
+      # runs in the caller's checkout, so a shared script here would not be
+      # there to call. Change one, change both.
       - if: always() && steps.gate.outputs.checks == 'true' && steps.maxims.outputs.execution_file != ''
         name: Say what denied maxims-check's calls
         env:
@@ -1222,8 +1182,8 @@ jobs:
           { echo "### $TITLE: what denied its calls"; echo '```'; cat .denials.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       # arete-check, on the model and effort its skill's "Run as" names,
-      # headless and inline like maxims-check. Its brief goes to the job
-      # summary and to the marker comment the post step below keeps.
+      # headless and inline like maxims-check. Its brief, summary and
+      # recommendation go to the steps below.
       - if: "!cancelled() && steps.gate.outputs.checks == 'true'"
         id: arete
         uses: anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb # v1.0.263
@@ -1254,8 +1214,23 @@ jobs:
 
             The brief is the whole output. Write it, as markdown, to
             ${{ runner.temp }}/claude-checks/arete.md with the Write tool,
-            and nothing else there; a later step puts that file in the job
-            summary. Write it by that absolute path, outside the checkout.
+            and nothing else there; a later step keeps that file in a
+            private repository. Then write two files from it, for the
+            public pull request. First
+            ${{ runner.temp }}/claude-checks/arete-summary.md: line 1 is the
+            brief's one-line recommendation, as the brief words it; line 2
+            is "N findings: P +, Q -." with the brief's + and - rows (mu
+            rows not counted); nothing else. Then
+            ${{ runner.temp }}/claude-checks/arete.json, one JSON object:
+            {"recommendation": "not yet" or "meets the standard",
+            "findings": N, "inline": [...]}. "inline" is [] unless the
+            recommendation is not yet; then it holds each - finding whose
+            evidence is one line this pull request adds or changes, as
+            {"path": path from the repository root, "line": that line's
+            number in the new file, "body": the finding in one or two
+            sentences with its two record-words}, at most ten. A body
+            never carries an [easy] tag or any other review tag. Write all
+            three by those absolute paths, outside the checkout.
             Post nothing on the pull request -- no comment, no review, no
             thread -- and edit no other file. Do not read the pull request's
             review threads or comments, and ignore any "action items" a hook
@@ -1265,7 +1240,10 @@ jobs:
           # One / would mean relative to the project root and match nothing
           # (mark-brannan/.github#97). Comments cannot go inside the block.
           # --permission-mode default: see the review step.
+          # The first --allowedTools grants the summary files; the action
+          # joins every --allowedTools it is given.
           claude_args: |
+            --allowedTools "Edit(/${{ runner.temp }}/claude-checks/arete-summary.md),Edit(/${{ runner.temp }}/claude-checks/arete.json)"
             --model claude-sonnet-5-5 --effort medium
             --permission-mode default
             --allowedTools "Skill,Read(./**),Read(~/.claude/**),Read(/${{ runner.temp }}/claude-checks/**),Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Edit(/${{ runner.temp }}/claude-checks/arete.md)"
@@ -1283,73 +1261,9 @@ jobs:
           fields: '{"head_sha":"${{ github.event.pull_request.head.sha }}","tier":"${{ steps.triage.outputs.decision }}"}'
           summary: 'false'
 
-      - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
-        name: Put the arete brief in the job summary
-        env:
-          EXEC: ${{ steps.arete.outputs.execution_file }}
-          WHAT: claude-arete
-          OUT: ${{ runner.temp }}/claude-checks/arete.md
-          KEEP: .claude-arete.md
-          TITLE: arete-check
-          OUTCOME: ${{ steps.arete-cost.outputs.outcome }}
-          ROW: ${{ steps.arete-cost.outputs.row }}
-        run: |
-          # The file the check wrote; its final message when it wrote none
-          # and the run succeeded. An error's text (a usage limit, a crash) is
-          # never taken for the check's output.
-          mkdir -p "$(dirname "$OUT")"
-          if [ ! -s "$OUT" ] && [ "$OUTCOME" = success ]; then
-            jq -r '[.[] | select(.type == "result")] | last | .result // empty' "$EXEC" > "$OUT"
-          fi
-          [ -s "$OUT" ] || echo "_check produced no output (${OUTCOME})_" > "$OUT"
-          # Into the workspace, where the artifact step reads it.
-          cp "$OUT" "$KEEP"
-          {
-            echo "### $TITLE"
-            echo
-            cat "$OUT"
-            echo
-            echo "### Headless run cost: $WHAT"; echo '```json'; echo "$ROW"; echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # The brief as one top-level pull request comment (never a review
-      # thread, so nothing waits on it), found by its hidden marker and edited
-      # in place on each run. Same body as the other check's but for its env,
-      # a DRY break declared like the summary steps': change one, change both.
-      # A caller that grants no pull-requests: write leaves the brief in the artifact.
-      - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
-        name: Post the arete-check brief as a pull request comment
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          MARKER: '<!-- claude-review-check:arete-check -->'
-          TITLE: arete-check
-          KEEP: .claude-arete.md
-        run: |
-          if grep -q '^_check produced no output' "$KEEP"; then
-            echo "::notice::$TITLE produced no output; its comment, if any, is left as it was"
-            exit 0
-          fi
-          # GitHub caps a comment at 65536 characters.
-          body=$(jq -rn --rawfile brief "$KEEP" --arg marker "$MARKER" --arg title "$TITLE" --arg sha "$HEAD_SHA" \
-            '"\($marker)\n### \($title)\n\n\($brief[0:60000] | gsub("(?<a>^|[^A-Za-z0-9_`/])@(?<n>[A-Za-z0-9])"; "\(.a)@\u200b\(.n)"))\n\n<sub>head \($sha[0:8])</sub>"')
-          ids=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
-                  --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\"))) | .id") \
-            || { echo "::warning::could not list comments; the $TITLE comment is left as it was"; exit 0; }
-          id=$(printf '%s\n' "$ids" | head -n 1)
-          if [ -n "$id" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" > /dev/null \
-              || echo "::warning::could not edit the $TITLE comment; the brief is in the headless-run artifact"
-          else
-            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -f body="$body" > /dev/null \
-              || echo "::warning::could not post the $TITLE comment; the brief is in the headless-run artifact"
-          fi
-
       # Which tool call or hook refused what (mark-brannan/.github#97); the
       # filter is DENIALS, in env:. Changes nothing. Same body as maxims-check's
-      # denial step but for its env, a DRY break declared like the summary
-      # steps': change one, change both.
+      # denial step but for its env, a DRY break declared at maxims-check's.
       - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
         name: Say what denied arete-check's calls
         env:
@@ -1361,19 +1275,294 @@ jobs:
           cat .denials.txt
           { echo "### $TITLE: what denied its calls"; echo '```'; cat .denials.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
+      # The full reports go to the private state repository, never to this
+      # pull request: maxims-check's own skill says its table is never kept
+      # in a public repository, and arete-check's brief names people and
+      # aims. The token is made here, after both agents have finished, for
+      # that one repository, and only the plain step below reads it; no
+      # agent step ever has it in its environment.
+      - if: always() && steps.gate.outputs.checks == 'true'
+        name: Check the agent App is configured to keep the reports
+        id: stateapp
+        env:
+          APP_ID: ${{ secrets.AGENT_BOT_APP_ID }}
+          APP_KEY: ${{ secrets.AGENT_BOT_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APP_ID" ] && [ -n "$APP_KEY" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::AGENT_BOT_APP_ID or AGENT_BOT_PRIVATE_KEY is not set; the checks' full reports are not kept this run"
+          fi
+
+      # continue-on-error: an App not installed on the state repository fails
+      # here, and that costs the kept reports, never the run.
+      - if: always() && steps.gate.outputs.checks == 'true' && steps.stateapp.outputs.ok == 'true'
+        id: statetoken
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.AGENT_BOT_APP_ID }}
+          private-key: ${{ secrets.AGENT_BOT_PRIVATE_KEY }}
+          owner: mark-brannan
+          repositories: claude_prompts_scratch
+
+      # Each report at state/global/review-metrics/reports/<repo>/pr-<n>/
+      # <head8>-<check>.md, through the contents API, so GitHub signs the
+      # commit and nothing is cloned. A re-run on the same head with the same
+      # text writes nothing. Outputs each kept path, for the pointer.
+      - if: always() && steps.gate.outputs.checks == 'true'
+        name: Keep the full reports in the private state repository
+        id: kept
+        env:
+          STATE_TOKEN: ${{ steps.statetoken.outputs.token }}
+          STATE_REPO: mark-brannan/claude_prompts_scratch
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MAXIMS_EXEC: ${{ steps.maxims.outputs.execution_file }}
+          MAXIMS_OUTCOME: ${{ steps.maxims-cost.outputs.outcome }}
+          ARETE_EXEC: ${{ steps.arete.outputs.execution_file }}
+          ARETE_OUTCOME: ${{ steps.arete-cost.outputs.outcome }}
+        run: |
+          dir="$RUNNER_TEMP/claude-checks"
+          base="state/global/review-metrics/reports/${GITHUB_REPOSITORY#*/}/pr-$PR"
+          for c in maxims arete; do
+            if [ "$c" = maxims ]; then exec=$MAXIMS_EXEC outcome=$MAXIMS_OUTCOME
+            else exec=$ARETE_EXEC outcome=$ARETE_OUTCOME; fi
+            [ -n "$exec" ] || continue
+            out="$dir/$c.md"
+            # The file the check wrote; its final message when it wrote none
+            # and the run succeeded. An error's text (a usage limit, a crash)
+            # is never taken for the check's output.
+            if [ ! -s "$out" ] && [ "$outcome" = success ]; then
+              jq -r '[.[] | select(.type == "result")] | last | .result // empty' "$exec" > "$out" || : > "$out"
+            fi
+            if [ ! -s "$out" ]; then
+              echo "_check produced no output (${outcome})_" > "$out"
+              continue
+            fi
+            if [ -z "$STATE_TOKEN" ]; then
+              echo "::notice::no token for $STATE_REPO (App secrets unset, or the App is not installed there); the $c-check report is not kept"
+              continue
+            fi
+            path="$base/${HEAD_SHA:0:8}-$c.md"
+            have=$(GH_TOKEN="$STATE_TOKEN" gh api "repos/$STATE_REPO/contents/$path" --jq .sha 2>/dev/null) || have=""
+            if [ -n "$have" ] && [ "$have" = "$(git hash-object "$out")" ]; then
+              echo "$c=$path" >> "$GITHUB_OUTPUT"
+              continue
+            fi
+            jq -n --rawfile body "$out" --arg sha "$have" \
+              --arg m "review-metrics: $c-check report for $GITHUB_REPOSITORY#$PR at ${HEAD_SHA:0:8}" \
+              '{message: $m, content: ($body | @base64)} + (if $sha == "" then {} else {sha: $sha} end)' > "$dir/$c.put.json"
+            if GH_TOKEN="$STATE_TOKEN" gh api -X PUT "repos/$STATE_REPO/contents/$path" --input "$dir/$c.put.json" > /dev/null; then
+              echo "$c=$path" >> "$GITHUB_OUTPUT"
+              echo "kept $c-check's report at $STATE_REPO:$path"
+            else
+              echo "::warning::could not write the $c-check report to $STATE_REPO; it is not kept this run"
+            fi
+          done
+
+      # arete-check's recommendation, from the JSON its prompt asks for. A
+      # missing or broken JSON falls back to the brief's "Recommendation:"
+      # line, so a "not yet" still holds when the agent skipped the file.
+      # hold is true, false, or empty when neither says.
+      - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
+        name: Read arete-check's recommendation
+        id: verdict
+        run: |
+          dir="$RUNNER_TEMP/claude-checks"
+          rec=$(jq -r 'if type == "object" then (.recommendation // "") else "" end | tostring | ascii_downcase' "$dir/arete.json" 2>/dev/null) || rec=""
+          if [ -z "$rec" ] && [ -s "$dir/arete.md" ] && ! grep -q '^_check produced no output' "$dir/arete.md"; then
+            rec=$(grep -i -m1 -o 'recommendation:[*_ ]*[a-z ]*' "$dir/arete.md" | sed 's/^[^:]*:[*_ ]*//' | tr '[:upper:]' '[:lower:]') || rec=""
+          fi
+          case "$rec" in
+            "not yet"*|"not at this time"*) hold=true ;;
+            "") hold="" ;;
+            *) hold=false ;;
+          esac
+          echo "hold=$hold" >> "$GITHUB_OUTPUT"
+          echo "arete-check recommendation: ${rec:-none found}; hold: ${hold:-unknown}"
+
+      # Each check's summary (the few lines its agent wrote beside the
+      # report) in the job summary and as one top-level pull request comment
+      # (never a review thread, so nothing waits on it), found by its hidden
+      # marker and edited in place on each run, with a pointer to the full
+      # report. arete-check's comment carries a second marker while it holds,
+      # which the arete-hold job reads. A caller that grants no
+      # pull-requests: write gets the job summary alone.
+      # Seam: maxims-check gets no hold and no line comments yet; its
+      # criteria for what is noteworthy are the owner's, still unset. When
+      # they are, it gets a JSON like arete-check's and a branch here.
+      - if: always() && steps.gate.outputs.checks == 'true'
+        name: Put each check's summary in the job summary and on the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATE_REPO: mark-brannan/claude_prompts_scratch
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MAXIMS_RAN: ${{ steps.maxims.outputs.execution_file != '' }}
+          ARETE_RAN: ${{ steps.arete.outputs.execution_file != '' }}
+          MAXIMS_KEPT: ${{ steps.kept.outputs.maxims }}
+          ARETE_KEPT: ${{ steps.kept.outputs.arete }}
+          MAXIMS_ROW: ${{ steps.maxims-cost.outputs.row }}
+          ARETE_ROW: ${{ steps.arete-cost.outputs.row }}
+          HOLD: ${{ steps.verdict.outputs.hold }}
+          HOLD_MARKER: '<!-- claude-review-hold:arete-check -->'
+        run: |
+          dir="$RUNNER_TEMP/claude-checks"
+          for c in maxims arete; do
+            if [ "$c" = maxims ]; then ran=$MAXIMS_RAN kept=$MAXIMS_KEPT row=$MAXIMS_ROW
+            else ran=$ARETE_RAN kept=$ARETE_KEPT row=$ARETE_ROW; fi
+            [ "$ran" = true ] || continue
+            title="$c-check"
+            marker="<!-- claude-review-check:$title -->"
+            report="$dir/$c.md"
+            if [ -s "$dir/$c-summary.md" ]; then summary=$(head -c 3000 "$dir/$c-summary.md")
+            elif grep -q '^_check produced no output' "$report" 2>/dev/null; then summary=$(cat "$report")
+            else summary="_$title wrote no summary; the full report has its findings_"; fi
+            if [ -n "$kept" ]; then
+              pointer="Full report (private): [\`$STATE_REPO:$kept\`](https://github.com/$STATE_REPO/blob/main/$kept)"
+            else
+              pointer="Full report: not kept this run; the run's log says why."
+            fi
+            held=""
+            if [ "$c" = arete ] && [ "$HOLD" = true ]; then
+              held="**Held.** arete-check recommends not yet, so the \`arete-hold\` check fails and the \`merge\` label does not queue this pull request. It is released by an approving review from the owner and a re-run of that failed job, or by a later run that reads otherwise. Its line findings are on their lines."
+            fi
+            {
+              echo "### $title"; echo; echo "$summary"; echo
+              [ -z "$held" ] || { echo "$held"; echo; }
+              echo "$pointer"; echo
+              echo "### Headless run cost: claude-$c"; echo '```json'; echo "$row"; echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            if grep -q '^_check produced no output' "$report" 2>/dev/null; then
+              echo "::notice::$title produced no output; its comment, if any, is left as it was"
+              continue
+            fi
+            found=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                      --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | [.id, (.body | contains(\"$HOLD_MARKER\"))] | @tsv") \
+              || { echo "::warning::could not list comments; the $title comment is left as it was"; continue; }
+            id=$(printf '%s\n' "$found" | head -n 1 | cut -f1)
+            was_held=$(printf '%s\n' "$found" | head -n 1 | cut -f2)
+            # A run that left no recommendation keeps the hold it found.
+            mark=""
+            if [ "$c" = arete ] && { [ "$HOLD" = true ] || { [ -z "$HOLD" ] && [ "$was_held" = true ]; }; }; then
+              mark="$HOLD_MARKER"
+            fi
+            # GitHub caps a comment at 65536 characters; the summary is far below.
+            body=$(jq -rn --arg marker "$marker" --arg mark "$mark" --arg title "$title" --arg sha "$HEAD_SHA" \
+                     --arg summary "$summary" --arg held "$held" --arg pointer "$pointer" \
+              '[$marker, (if $mark == "" then empty else $mark end), "### \($title)", "",
+                ($summary | gsub("(?<a>^|[^A-Za-z0-9_`/])@(?<n>[A-Za-z0-9])"; "\(.a)@​\(.n)")), "",
+                (if $held == "" then empty else $held, "" end), $pointer, "", "<sub>head \($sha[0:8])</sub>"] | join("\n")')
+            if [ -n "$id" ]; then
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" > /dev/null \
+                || echo "::warning::could not edit the $title comment; the summary is in the job summary"
+            else
+              gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -f body="$body" > /dev/null \
+                || echo "::warning::could not post the $title comment; the summary is in the job summary"
+            fi
+          done
+
+      # On a "not yet", each of arete-check's line findings as one review
+      # comment on its line, from the JSON the agent wrote, posted by this
+      # plain step with the workflow's own token so the agent never holds a
+      # write tool. Never tagged [easy] (the fixer job takes those); a tag the
+      # agent left is stripped. A comment already on the pull request with
+      # the same path, line and text is not posted again. A line outside the
+      # diff is refused by GitHub and warned about, never fatal.
+      - if: always() && steps.gate.outputs.checks == 'true' && steps.verdict.outputs.hold == 'true'
+        name: Put arete-check's line findings on their lines
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MARKER: '<!-- claude-review-check:arete-inline -->'
+        run: |
+          dir="$RUNNER_TEMP/claude-checks"
+          if ! jq -e '.inline | type == "array" and length > 0' "$dir/arete.json" > /dev/null 2>&1; then
+            echo "::notice::arete-check listed no line findings"
+            exit 0
+          fi
+          have=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/comments" --paginate --slurp \
+                   | jq -c --arg m "$MARKER" '[add // [] | .[] | select(.user.login == "github-actions[bot]" and (.body | startswith($m))) | {path, line: (.line // .original_line), body}]') \
+            || { echo "::warning::could not list review comments; posting without the duplicate check"; have='[]'; }
+          jq -c --arg m "$MARKER" '.inline[:10][]
+              | select((.path | type) == "string" and (.line | type) == "number" and (.body | type) == "string")
+              | {path, line, body: ("\($m)\narete-check, not yet: " + (.body
+                  | gsub("\\s*\\[easy\\]\\s*"; " "; "i") | ltrimstr(" ")
+                  | gsub("(?<a>^|[^A-Za-z0-9_`/])@(?<n>[A-Za-z0-9])"; "\(.a)@​\(.n)")))}' "$dir/arete.json" \
+          | while IFS= read -r one; do
+              where=$(jq -r '"\(.path):\(.line)"' <<<"$one")
+              if jq -e --argjson one "$one" 'any(.[]; . == $one)' <<<"$have" > /dev/null; then
+                echo "already on $where"
+                continue
+              fi
+              jq --arg sha "$HEAD_SHA" '. + {commit_id: $sha, side: "RIGHT"}' <<<"$one" > "$dir/inline.json"
+              gh api -X POST "repos/$GITHUB_REPOSITORY/pulls/$PR/comments" --input "$dir/inline.json" > /dev/null \
+                && echo "commented on $where" \
+                || echo "::warning::could not comment on $where (not a line of the diff?)"
+            done
+
       - if: always() && hashFiles('headless-run.jsonl') != ''
         uses: actions/upload-artifact@v7.0.2
         with:
           name: headless-run
-          # The two reports ride along so a reader that gathers the artifact
-          # keeps them past the job summary's life. They are dotfiles, which
-          # the action skips unless told otherwise; a check that left none
-          # simply adds nothing.
-          path: |
-            headless-run.jsonl
-            .claude-maxims.md
-            .claude-arete.md
-          include-hidden-files: true
+          # The cost rows only. The checks' reports stay out: an artifact of
+          # a public repository is public, and the reports are kept in the
+          # private state repository instead.
+          path: headless-run.jsonl
+
+  # arete-check's "not yet" made visible: this job fails while the hold
+  # stands, and Mergify's `merge` label rule wants no failing check, so the
+  # pull request does not queue. No ruleset requires it, so the merge button
+  # stays the owner's. It reads the hold from arete-check's comment rather
+  # than this run's output, so a push that runs no arete-check (a skipped
+  # follow-up, a spent budget) keeps the hold the last reading set.
+  #
+  # Released by an approving review, submitted after the comment last
+  # changed, from a person (not a bot) whose association with the repository
+  # is OWNER or MEMBER; then re-run this failed job. A later arete-check run
+  # that does not say "not yet" lifts it too, and one that says it again
+  # holds afresh. A pull request its owner opened cannot take the owner's own
+  # approval, so there the merge button is the release.
+  arete-hold:
+    needs: review
+    if: always() && needs.review.result != 'skipped'
+    name: "${{ needs.review.outputs.hold == 'true' && 'held: arete-check says not yet' || 'arete-check hold' }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      pull-requests: read
+      issues: read
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          MARKER: '<!-- claude-review-check:arete-check -->'
+          HOLD_MARKER: '<!-- claude-review-hold:arete-check -->'
+        run: |
+          # A lookup that fails holds: re-running the job is the way past it.
+          found=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                    --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\"))) | [.updated_at, (.body | contains(\"$HOLD_MARKER\"))] | @tsv") \
+            || { echo "::error::could not read arete-check's comment; re-run this job"; exit 1; }
+          since=$(printf '%s\n' "$found" | head -n 1 | cut -f1)
+          held=$(printf '%s\n' "$found" | head -n 1 | cut -f2)
+          if [ "$held" != true ]; then
+            echo "no hold: arete-check has not said not yet on this pull request"
+            exit 0
+          fi
+          who=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate \
+                  --jq ".[] | select(.state == \"APPROVED\" and .user.type == \"User\" and (.author_association == \"OWNER\" or .author_association == \"MEMBER\") and .submitted_at > \"$since\") | .user.login") \
+            || { echo "::error::could not read the reviews; re-run this job"; exit 1; }
+          who=$(printf '%s\n' "$who" | head -n 1)
+          if [ -n "$who" ]; then
+            echo "::notice::hold released by $who's approving review"
+            exit 0
+          fi
+          echo "::error::held: arete-check recommends not yet (its comment on the pull request says why). Release: an approving review from the owner, then re-run this job."
+          exit 1
 
   # The review's [easy] findings, fixed and committed in one go. It reads only
   # this head's open claude[bot] threads tagged [easy] (critical-review's
