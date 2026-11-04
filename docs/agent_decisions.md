@@ -92,3 +92,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261030t084931z
 - fixer skips threads with any reply fixer replies post with github.token, not the App fixer reply signature: claude-fixer · model · low · run id update-branch only after a fix commit fixer cost row merged into the run's headless-run artifact via overwrite create-github-app-token@v3 with app-id (deprecated) to match secret name fixer refuses only the risky class, not governing documents ([#106](https://github.com/mark-brannan/.github/pull/106))
+
+### 20261104t221102z
+- Keep three renderers of the Try it line (check, portolani generator, Stop hook) rather than one fetched generator: the Stop hook stays offline Undo: add --line mode and have the siblings run it ([#114](https://github.com/mark-brannan/.github/pull/114#discussion_r4472416121)) ([#114](https://github.com/mark-brannan/.github/pull/114))
