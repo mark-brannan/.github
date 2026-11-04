@@ -32,8 +32,10 @@ name: show-dont-tell
 #
 # A repository that sets `serve:` also owes a "Try it" block: when a rendered
 # path is touched, the description must carry a `## Try it` heading followed
-# by text containing `pull/<N>/head` for this PR's N, else the check is red,
-# in addition to the picture-or-URL rule below. Why: the thing to show in a
+# by one exact line (on a line of its own) for this PR's N, else the check is
+# red, in addition to the picture-or-URL rule below. Exact, because a loose
+# match let hand-written variants through (`gh pr checkout` in the main clone,
+# a wrong port, a command that only prints the line). Why: the thing to show in a
 # UX repo is the running page, and one paste (fetch the PR head, move a
 # detached worktree, install, serve on port 10000 + N) beats rebuilding it by
 # hand. The red summary prints the block rendered from the fields above, with
