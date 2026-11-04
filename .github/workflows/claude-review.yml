@@ -928,6 +928,12 @@ jobs:
       - if: steps.gate.outputs.run == 'true'
         id: review
         uses: anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb # v1.0.263
+        # Strip the Anthropic and cloud credentials from every shell the
+        # agent starts, so no Bash call can read the OAuth token from its
+        # own environment. The action turns this on only for
+        # allowed_non_write_users; this workflow reads outsiders' text too.
+        env:
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
@@ -976,6 +982,7 @@ jobs:
             --model "${{ steps.triage.outputs.model }}" ${{ steps.triage.outputs.effort-arg }}
             --permission-mode default
             --allowedTools "${{ env.REVIEW_TOOLS }}${{ inputs.allowed-tools && format(',{0}', inputs.allowed-tools) || '' }},Read(.writing-rubric.md),Read(.prior-threads.json)"
+            --disallowedTools "Read(//proc/**),Read(./.git/**)"
 
       # Proof the guards were live, read from the session's own init message
       # rather than from what the install step claimed. Checked after the run
@@ -1076,6 +1083,12 @@ jobs:
       - if: "!cancelled() && steps.gate.outputs.checks == 'true'"
         id: maxims
         uses: anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb # v1.0.263
+        # Strip the Anthropic and cloud credentials from every shell the
+        # agent starts, so no Bash call can read the OAuth token from its
+        # own environment. The action turns this on only for
+        # allowed_non_write_users; this workflow reads outsiders' text too.
+        env:
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: mergify[bot],mark-brannan-release-please[bot],claude[bot],mark-brannan-agent[bot],${{ inputs.allowed-bots }}
@@ -1110,7 +1123,8 @@ jobs:
           claude_args: |
             --model claude-sonnet-5-5 --effort medium
             --permission-mode default
-            --allowedTools "Skill,Read,Glob,Grep,Read(~/.claude/skills/**),Bash(gh pr diff:*),Bash(gh pr view:*),Edit(/${{ runner.temp }}/claude-checks/maxims.md)"
+            --allowedTools "Skill,Read(./**),Read(~/.claude/**),Read(/${{ runner.temp }}/claude-checks/**),Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Edit(/${{ runner.temp }}/claude-checks/maxims.md)"
+            --disallowedTools "Read(//proc/**),Read(./.git/**)"
 
       # The cost row comes from the shared headless-run-cost action.
       - if: always() && steps.gate.outputs.checks == 'true' && steps.maxims.outputs.execution_file != ''
@@ -1213,6 +1227,12 @@ jobs:
       - if: "!cancelled() && steps.gate.outputs.checks == 'true'"
         id: arete
         uses: anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb # v1.0.263
+        # Strip the Anthropic and cloud credentials from every shell the
+        # agent starts, so no Bash call can read the OAuth token from its
+        # own environment. The action turns this on only for
+        # allowed_non_write_users; this workflow reads outsiders' text too.
+        env:
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: mergify[bot],mark-brannan-release-please[bot],claude[bot],mark-brannan-agent[bot],${{ inputs.allowed-bots }}
@@ -1248,7 +1268,8 @@ jobs:
           claude_args: |
             --model claude-sonnet-5-5 --effort medium
             --permission-mode default
-            --allowedTools "Skill,Read,Glob,Grep,Read(~/.claude/skills/**),Bash(gh pr diff:*),Bash(gh pr view:*),Edit(/${{ runner.temp }}/claude-checks/arete.md)"
+            --allowedTools "Skill,Read(./**),Read(~/.claude/**),Read(/${{ runner.temp }}/claude-checks/**),Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Edit(/${{ runner.temp }}/claude-checks/arete.md)"
+            --disallowedTools "Read(//proc/**),Read(./.git/**)"
 
       - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
         name: Record the cost of arete-check
@@ -1468,6 +1489,12 @@ jobs:
       - if: steps.plan.outputs.tasks > 0
         id: agent
         uses: anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb # v1.0.263
+        # Strip the Anthropic and cloud credentials from every shell the
+        # agent starts, so no Bash call can read the OAuth token from its
+        # own environment. The action turns this on only for
+        # allowed_non_write_users; this workflow reads outsiders' text too.
+        env:
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
@@ -1491,7 +1518,8 @@ jobs:
             --model ${{ env.FIXER_MODEL }} --effort low
             --permission-mode default
             --setting-sources user --strict-mcp-config
-            --allowedTools "Read,Glob,Grep,${{ steps.plan.outputs.edit-tools }}"
+            --allowedTools "Read(./**),Read(/${{ env.FIXER_DIR }}/**),Glob,Grep,${{ steps.plan.outputs.edit-tools }}"
+            --disallowedTools "Read(//proc/**),Read(./.git/**)"
 
       # Minted only now, after the agent, so nothing the agent's run touched
       # ever held it. No permission is requested, so the token carries
