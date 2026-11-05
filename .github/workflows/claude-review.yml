@@ -959,7 +959,7 @@ jobs:
       # runner has no plugin cache, so the action installs it here.
       - if: steps.gate.outputs.run == 'true'
         id: review
-        uses: anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb # v1.0.263
+        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         # Strip the Anthropic and cloud credentials from every shell the
         # agent starts, so no Bash call finds the OAuth token in the shell's
         # own environment. The action turns this on only for
@@ -1094,7 +1094,7 @@ jobs:
       # the two are independent readings of the same diff.
       - if: "!cancelled() && steps.gate.outputs.checks == 'true'"
         id: maxims
-        uses: anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb # v1.0.263
+        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         # Strip the Anthropic and cloud credentials from every shell the
         # agent starts, so no Bash call finds the OAuth token in the shell's
         # own environment. The action turns this on only for
@@ -1182,7 +1182,7 @@ jobs:
       # recommendation go to the steps below.
       - if: "!cancelled() && steps.gate.outputs.checks == 'true'"
         id: arete
-        uses: anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb # v1.0.263
+        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         # Strip the Anthropic and cloud credentials from every shell the
         # agent starts, so no Bash call finds the OAuth token in the shell's
         # own environment. The action turns this on only for
@@ -1763,7 +1763,7 @@ jobs:
 
       - if: steps.plan.outputs.tasks > 0
         id: agent
-        uses: anthropics/claude-code-action@8041f1d17e0e7d2f2cfe35002962e9f26237c0bb # v1.0.263
+        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         # Strip the Anthropic and cloud credentials from every shell the
         # agent starts, so no Bash call finds the OAuth token in the shell's
         # own environment. The action turns this on only for
