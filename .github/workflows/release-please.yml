@@ -78,6 +78,15 @@ on:
           changing it means changing the trusted publisher too.
         type: string
         default: publish.yml
+      publish-path:
+        description: >-
+          The release-please package path whose release dispatches the
+          publish workflow. "." is the root package. A repository whose
+          published package is not its root (portolani publishes the
+          Signal K plugin in signalk/) names that package's path here, and
+          releases of the other packages tag but publish nothing.
+        type: string
+        default: "."
     secrets:
       RELEASE_PLEASE_APP_CLIENT_ID:
         required: true
@@ -104,8 +113,8 @@ jobs:
       pull-requests: write # open and update the release pull request
       actions: write # dispatch the publish workflow below
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
+      release_created: ${{ steps.pick.outputs.release_created }}
+      tag_name: ${{ steps.pick.outputs.tag_name }}
     steps:
       # release-please's own commits, PR and tag are all authored through
       # whatever token we hand it. The default GITHUB_TOKEN doesn't fire
@@ -130,6 +139,25 @@ jobs:
           config-file: ${{ inputs.config-file }}
           manifest-file: ${{ inputs.manifest-file }}
 
+      # release-please names a non-root package's outputs `<path>--name`;
+      # only the root's come unprefixed. Pick the package that publishes.
+      - name: Pick the release of the package that publishes
+        id: pick
+        env:
+          P: ${{ inputs.publish-path }}
+          ROOT_CREATED: ${{ steps.release.outputs.release_created }}
+          ROOT_TAG: ${{ steps.release.outputs.tag_name }}
+          PATH_CREATED: ${{ steps.release.outputs[format('{0}--release_created', inputs.publish-path)] }}
+          PATH_TAG: ${{ steps.release.outputs[format('{0}--tag_name', inputs.publish-path)] }}
+        run: |
+          if [ "$P" = "." ]; then
+            echo "release_created=$ROOT_CREATED" >> "$GITHUB_OUTPUT"
+            echo "tag_name=$ROOT_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_created=$PATH_CREATED" >> "$GITHUB_OUTPUT"
+            echo "tag_name=$PATH_TAG" >> "$GITHUB_OUTPUT"
+          fi
+
       # release-please's tag is pushed as the App, which DOES fire
       # workflows -- but the publish workflow has no `push: tags` trigger,
       # so that doesn't start a second, racing publish. This dispatch stays
@@ -146,11 +174,11 @@ jobs:
       # which is what we want: the dispatch, the run lookup and the trusted
       # publisher all belong to the repo being released.
       - name: Trigger the publish, and wait for it to actually succeed
-        if: inputs.publish && steps.release.outputs.release_created == 'true'
+        if: inputs.publish && steps.pick.outputs.release_created == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ steps.release.outputs.tag_name }}
+          TAG: ${{ steps.pick.outputs.tag_name }}
           WORKFLOW: ${{ inputs.publish-workflow }}
         run: |
           BEFORE=$(gh run list --workflow="$WORKFLOW" --json databaseId --jq '.[0].databaseId // 0')
