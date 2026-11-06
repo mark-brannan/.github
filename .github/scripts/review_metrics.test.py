@@ -144,6 +144,16 @@ with:
             f = rm.parse_log(stamped(log))
             self.assertEqual((f["model"], f["cost"], f["effort"]), ("", None, ""))
 
+    def test_triage_running_substantive_check_is_not_a_review(self):
+        # substantive-check runs untracked in the triage job; the tier is the
+        # triage notice its tier step prints after it.
+        log = ("env:\n  CLASSES: lock=0 design=1 docs=0 risky=0 code=0\n"
+               + self.invocation("claude-sonnet-5-5", "medium", 0.21, False)
+               + "\n##[notice]review triage: deep (substantive-check: substantive (criteria 8))\n")
+        f = rm.parse_log(stamped(log))
+        self.assertEqual((f["model"], f["cost"], f["effort"], f["tier"], f["why"], f["paths"]),
+                         ("", None, "", "deep", "substantive-check: substantive (criteria 8)", "design"))
+
     def test_every_jobs_row_carries_the_triage_jobs_tier_and_paths(self):
         logs = {1: stamped("##[notice]review triage: deep (2 risky path(s): anything under .github/)\n"
                            "env:\n  CLASSES: lock=0 design=0 docs=1 risky=2 code=0"),
