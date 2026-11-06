@@ -625,7 +625,6 @@ jobs:
           echo "used=$used" >> "$GITHUB_OUTPUT"
           if [ "${used%.*}" -ge "$PAUSE_AT" ]; then
             echo "pause=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::review triage: skip (plan usage at $used%, pause at $PAUSE_AT%)"
           else
             echo "pause=false" >> "$GITHUB_OUTPUT"
           fi
@@ -859,10 +858,10 @@ jobs:
           # trailers, decided here because a headless run cannot switch model.
           # A declared DRY break: mark-brannan/claude lib/critical_review.py
           # (FAMILIES, PREFERENCE, TRAILER, pick_reviewer) is this logic's
-          # other home, and a change to either belongs in both. The rule
-          # changed here first: the tier now sets which way a switch may go
-          # (the deep tier never below Opus, the default sideways or down,
-          # never up), and lib/critical_review.py has yet to follow. One rule
+          # other home, and a change to either belongs in both. The tier sets
+          # which way a switch may go: the deep tier never below Opus, the
+          # default sideways or down, never up (the port to pick_reviewer is
+          # card 17940010854a87b845). One rule
           # of this copy's own: the tier's model stands while its family
           # coded none of the PR, so the tier keeps setting the cost.
           family_of() {
