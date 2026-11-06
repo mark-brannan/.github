@@ -284,8 +284,8 @@ on:
         required: false
 
 # The risky class's built-in globs, shell `case` patterns against the path
-# from the repo root: triage's risky_path() and the fixer both read this one
-# list, then the caller's `risky-paths`.
+# from the repo root: triage's risky_path() reads this list, then the caller's
+# `risky-paths`. They pick the review's tier only; the fixer fences no path.
 env:
   RISKY_BUILTIN: >-
     .github/* action.yml */action.yml .mergify.yml CODEOWNERS
@@ -1639,11 +1639,14 @@ jobs:
   # The review's [easy] findings, fixed and committed in one go. It reads only
   # this head's open claude[bot] threads tagged [easy] (critical-review's
   # "Easy." paragraph): a ```suggestion fence is applied by script, the rest go
-  # to a small model allowed to edit only the files those threads name. A risky
-  # path is refused before any edit and again at the commit. The commit is made
+  # to a small model allowed to edit only the files those threads name. No path
+  # is off limits by its name: a hook, a workflow or a config is fixed like
+  # any other (a workflow needs the agent App to hold `workflows`). The commit is made
   # through the API with the agent App's token, so GitHub signs it; nothing is
   # pushed from the runner. Each thread gets one reply, with the sha or why
-  # not; none is resolved, that stays the author's.
+  # not; none is resolved, that stays the author's. A branch that is behind
+  # its base is brought up to date first, so the fix commit is the last push
+  # and its checks are not cancelled by a merge landing after it.
   #
   # Runs only behind a review this run posted, and never on its own work: an
   # App-token commit fires `synchronize` (a `review:deep` label or
@@ -1666,7 +1669,6 @@ jobs:
       pull-requests: write
     env:
       CLAUDE_STOP_COMMIT: off
-      RISKY_PATHS: ${{ inputs.risky-paths }}
       PR: ${{ github.event.pull_request.number }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       FIXER_MODEL: claude-haiku-5-5
@@ -1708,8 +1710,8 @@ jobs:
         id: tools
         uses: mark-brannan/.github/.github/actions/easy-fixes@main
 
-      # This head's [easy] threads, with the suggestion fences applied and a
-      # risky path refused; what is left is the agent's.
+      # This head's [easy] threads, with the suggestion fences applied; what is
+      # left is the agent's.
       - if: steps.app.outputs.run == 'true'
         name: List this head's easy threads and apply their suggestions
         id: plan
@@ -1729,7 +1731,7 @@ jobs:
                         nodes { databaseId url body author { login __typename } originalCommit { oid } } } } } } } }' \
             --jq '.data.repository.pullRequest.reviewThreads.nodes' > "$FIXER_DIR/threads.json"
           git log -1 --format=%B "$HEAD_SHA" > "$FIXER_DIR/head-message.txt"
-          RISKY="$RISKY_BUILTIN ${RISKY_PATHS:-}" python3 "$SCRIPT" plan \
+          python3 "$SCRIPT" plan \
             --threads "$FIXER_DIR/threads.json" --head "$HEAD_SHA" --root . \
             --head-message "$FIXER_DIR/head-message.txt" --out "$FIXER_DIR/plan.json"
           # Step outputs are out of the agent's reach: the steps after it check
@@ -1741,8 +1743,8 @@ jobs:
           echo '[]' > "$FIXER_DIR/agent.json"
           echo "threads=$(jq length "$FIXER_DIR/plan.json")" >> "$GITHUB_OUTPUT"
           echo "tasks=$(jq length "$FIXER_DIR/tasks.json")" >> "$GITHUB_OUTPUT"
-          # Edit on exactly the files the agent's threads name, none risky by
-          # now; the leading / makes //<abs path> for its own answer file.
+          # Edit on exactly the files the agent's threads name; the leading /
+          # makes //<abs path> for its own answer file.
           tools=$(jq -r --arg ans "$FIXER_DIR/agent.json" \
             '[.[] | .path // empty | "Edit(/\(.))"] + ["Edit(/\($ans))"] | unique | join(",")' "$FIXER_DIR/tasks.json")
           echo "edit-tools=$tools" >> "$GITHUB_OUTPUT"
@@ -1807,13 +1809,58 @@ jobs:
           app-id: ${{ secrets.AGENT_BOT_APP_ID }}
           private-key: ${{ secrets.AGENT_BOT_PRIVATE_KEY }}
 
+      # Merely behind: bring it up to date before the fix commit, a signed
+      # merge by the same App, so the fix is the last push and nothing lands
+      # after it to cancel its checks. A conflict is not resolved here; it goes
+      # in the replies. The API answers 202 and merges later, so wait for the
+      # head to move; the paths the merge changed are listed in moved.txt, and
+      # the commit step leaves those files alone.
+      - if: "!cancelled() && steps.plan.outcome == 'success' && steps.plan.outputs.threads > 0"
+        name: Update the branch if it is behind
+        id: update
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -uo pipefail
+          : > "$FIXER_DIR/moved.txt"
+          for _ in 1 2 3 4 5; do
+            mergeable=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.mergeable') || mergeable=null
+            [ "$mergeable" != null ] && break
+            sleep 3
+          done
+          base=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.base.ref')
+          behind=$(gh api "repos/$GITHUB_REPOSITORY/compare/$base...$HEAD_SHA" --jq '.behind_by') || behind=unknown
+          if [ "$mergeable" = false ]; then
+            echo "note=The branch conflicts with $base; the fixer did not update it." >> "$GITHUB_OUTPUT"
+          elif [ "$behind" != unknown ] && [ "$behind" -gt 0 ]; then
+            if gh api -X PUT "repos/$GITHUB_REPOSITORY/pulls/$PR/update-branch" -f expected_head_sha="$HEAD_SHA" >/dev/null; then
+              new=$HEAD_SHA
+              for _ in $(seq 1 15); do
+                new=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.head.sha') || new=$HEAD_SHA
+                [ "$new" != "$HEAD_SHA" ] && break
+                sleep 2
+              done
+              if [ "$new" = "$HEAD_SHA" ]; then
+                echo "::warning::update-branch did not land in time; the fix is committed on the old head"
+              elif gh api --paginate "repos/$GITHUB_REPOSITORY/compare/$HEAD_SHA...$new" --jq '.files[].filename' > "$FIXER_DIR/moved.txt"; then
+                echo "head=$new" >> "$GITHUB_OUTPUT"
+                echo "note=Branch brought up to date with $base before the fix." >> "$GITHUB_OUTPUT"
+              else
+                : > "$FIXER_DIR/moved.txt"
+                echo "::warning::could not list what the merge changed; the fix is committed on the old head"
+              fi
+            else
+              echo "::warning::update-branch failed; the branch stays behind $base"
+            fi
+          fi
+
       # Runs whatever the agent did, so a failed agent never costs the
       # suggestion fixes; an agent thread with no answer is `left`.
-      # The second risky check, on what is actually in the tree: every change
-      # a taken thread does not name, or on a risky path, is reverted here and
-      # never reaches the commit. createCommitOnBranch makes one signed commit
-      # on the head the threads were read from (expectedHeadOid), so a push
-      # in between fails the commit rather than overwriting it.
+      # The check on what is actually in the tree: every change a taken thread
+      # does not name, or that the base branch changed in the update step, is
+      # reverted here and never reaches the commit. createCommitOnBranch makes
+      # one signed commit on the head the update step left (expectedHeadOid), so
+      # a push in between fails the commit rather than overwriting it.
       - if: "!cancelled() && steps.plan.outcome == 'success' && steps.plan.outputs.threads > 0"
         name: Commit the fixes
         id: commit
@@ -1823,6 +1870,7 @@ jobs:
           PLAN_SHA: ${{ steps.plan.outputs.plan-sha }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           BRANCH: ${{ github.event.pull_request.head.ref }}
+          TARGET_SHA: ${{ steps.update.outputs.head || github.event.pull_request.head.sha }}
           AGENT_RAN: ${{ steps.agent.outputs.execution_file != '' }}
         run: |
           set -euo pipefail
@@ -1831,8 +1879,9 @@ jobs:
             echo "::error::fixer.py or plan.json changed after the plan step; nothing committed"
             exit 1
           fi
-          RISKY="$RISKY_BUILTIN ${RISKY_PATHS:-}" python3 "$SCRIPT" gate \
-            --plan "$FIXER_DIR/plan.json" --agent "$FIXER_DIR/agent.json" --root . --out "$FIXER_DIR/gate.json"
+          python3 "$SCRIPT" gate \
+            --plan "$FIXER_DIR/plan.json" --agent "$FIXER_DIR/agent.json" --root . \
+            --moved "$FIXER_DIR/moved.txt" --out "$FIXER_DIR/gate.json"
           jq -r '.reverted[] | "::notice::reverted \(.path): \(.why)"' "$FIXER_DIR/gate.json"
           n=$(jq '.additions | length' "$FIXER_DIR/gate.json")
           if [ "$n" -eq 0 ]; then
@@ -1846,7 +1895,7 @@ jobs:
           if [ "$(jq '[.threads[] | select(.how == "agent")] | length' "$FIXER_DIR/gate.json")" -gt 0 ]; then
             body=$(printf '%s\nCo-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>' "$body")
           fi
-          jq -n --arg repo "$GITHUB_REPOSITORY" --arg branch "$BRANCH" --arg head "$HEAD_SHA" \
+          jq -n --arg repo "$GITHUB_REPOSITORY" --arg branch "$BRANCH" --arg head "$TARGET_SHA" \
             --arg headline "fix: apply $fixed easy review finding(s)" --arg body "$body" \
             --slurpfile g "$FIXER_DIR/gate.json" '{
               query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
@@ -1857,6 +1906,8 @@ jobs:
                 fileChanges: {additions: $g[0].additions}}}}' > "$FIXER_DIR/commit.json"
           if ! out=$(gh api graphql --input "$FIXER_DIR/commit.json" 2>&1); then
             case "$out" in
+              *workflow*)
+                why="GitHub refused a change under .github/workflows/; grant mark-brannan-agent the Workflows permission" ;;
               *"not accessible by integration"*|*FORBIDDEN*|*"403"*)
                 why="the agent App's token cannot write contents here; grant mark-brannan-agent Contents: write" ;;
               *"Expected branch to point to"*|*STALE_DATA*)
@@ -1871,33 +1922,6 @@ jobs:
           [ -n "$sha" ] || { echo "failure=no commit came back" >> "$GITHUB_OUTPUT"; echo "::error::no commit came back: $out"; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "::notice::committed $sha ($fixed fix(es)); agent ran: $AGENT_RAN"
-
-      # Merely behind: bring it up to date, a signed merge by the same App. A
-      # conflict is not resolved here; it goes in the replies.
-      - if: steps.commit.outputs.sha != ''
-        name: Update the branch if it is behind
-        id: update
-        env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
-          SHA: ${{ steps.commit.outputs.sha }}
-        run: |
-          set -uo pipefail
-          for _ in 1 2 3 4 5; do
-            mergeable=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.mergeable') || mergeable=null
-            [ "$mergeable" != null ] && break
-            sleep 3
-          done
-          base=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.base.ref')
-          behind=$(gh api "repos/$GITHUB_REPOSITORY/compare/$base...$SHA" --jq '.behind_by') || behind=unknown
-          if [ "$mergeable" = false ]; then
-            echo "note=The branch conflicts with $base; the fixer did not update it." >> "$GITHUB_OUTPUT"
-          elif [ "$behind" != unknown ] && [ "$behind" -gt 0 ]; then
-            if gh api -X PUT "repos/$GITHUB_REPOSITORY/pulls/$PR/update-branch" -f expected_head_sha="$SHA" >/dev/null; then
-              echo "note=Branch brought up to date with $base." >> "$GITHUB_OUTPUT"
-            else
-              echo "::warning::update-branch failed; the branch stays behind $base"
-            fi
-          fi
 
       - if: "!cancelled() && steps.plan.outcome == 'success'"
         name: Reply in each thread and roll up
