@@ -1812,17 +1812,31 @@ jobs:
       # Merely behind: bring it up to date before the fix commit, a signed
       # merge by the same App, so the fix is the last push and nothing lands
       # after it to cancel its checks. A conflict is not resolved here; it goes
-      # in the replies. The API answers 202 and merges later, so wait for the
-      # head to move; the paths the merge changed are listed in moved.txt, and
-      # the commit step leaves those files alone.
+      # in the replies. Only when the gate would commit something: a merge with
+      # no fix behind it would only start another review. The API answers 202
+      # and merges later, so wait for the head to move; the paths the merge
+      # changed (both sides of a rename) are listed in moved.txt, and the commit
+      # step leaves those files alone. When that cannot be told, `skip` says why
+      # and nothing is committed.
       - if: "!cancelled() && steps.plan.outcome == 'success' && steps.plan.outputs.threads > 0"
         name: Update the branch if it is behind
         id: update
         env:
+          SCRIPT: ${{ steps.tools.outputs.script }}
+          SCRIPT_SHA: ${{ steps.plan.outputs.script-sha }}
+          PLAN_SHA: ${{ steps.plan.outputs.plan-sha }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           set -uo pipefail
           : > "$FIXER_DIR/moved.txt"
+          if ! printf '%s  %s\n%s  %s\n' "$SCRIPT_SHA" "$SCRIPT" "$PLAN_SHA" "$FIXER_DIR/plan.json" | sha256sum -c --quiet; then
+            echo "skip=the fixer script or plan changed after the plan step" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Would the gate commit anything? It is idempotent: the commit step runs it again.
+          python3 "$SCRIPT" gate --plan "$FIXER_DIR/plan.json" --agent "$FIXER_DIR/agent.json" --root . \
+            --out "$FIXER_DIR/gate-pre.json" || true
+          [ "$(jq '.additions | length' "$FIXER_DIR/gate-pre.json" 2>/dev/null || echo 0)" -gt 0 ] || exit 0
           for _ in 1 2 3 4 5; do
             mergeable=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.mergeable') || mergeable=null
             [ "$mergeable" != null ] && break
@@ -1841,13 +1855,18 @@ jobs:
                 sleep 2
               done
               if [ "$new" = "$HEAD_SHA" ]; then
-                echo "::warning::update-branch did not land in time; the fix is committed on the old head"
-              elif gh api --paginate "repos/$GITHUB_REPOSITORY/compare/$HEAD_SHA...$new" --jq '.files[].filename' > "$FIXER_DIR/moved.txt"; then
+                echo "::warning::update-branch did not land in time; nothing committed"
+                echo "skip=the branch update was accepted but had not landed yet, so no fix was committed" >> "$GITHUB_OUTPUT"
+              elif files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$HEAD_SHA...$new" \
+                     --jq '.files[] | .filename, (.previous_filename // empty)') \
+                   && [ "$(printf '%s\n' "$files" | grep -c .)" -lt 300 ]; then
+                printf '%s\n' "$files" > "$FIXER_DIR/moved.txt"
                 echo "head=$new" >> "$GITHUB_OUTPUT"
                 echo "note=Branch brought up to date with $base before the fix." >> "$GITHUB_OUTPUT"
               else
-                : > "$FIXER_DIR/moved.txt"
-                echo "::warning::could not list what the merge changed; the fix is committed on the old head"
+                # The compare endpoint lists at most 300 files: a full page is unknown.
+                echo "::warning::could not list what the merge changed; nothing committed"
+                echo "skip=could not tell what the branch update changed, so no fix was committed" >> "$GITHUB_OUTPUT"
               fi
             else
               echo "::warning::update-branch failed; the branch stays behind $base"
@@ -1872,8 +1891,13 @@ jobs:
           BRANCH: ${{ github.event.pull_request.head.ref }}
           TARGET_SHA: ${{ steps.update.outputs.head || github.event.pull_request.head.sha }}
           AGENT_RAN: ${{ steps.agent.outputs.execution_file != '' }}
+          SKIP: ${{ steps.update.outputs.skip }}
         run: |
           set -euo pipefail
+          if [ -n "$SKIP" ]; then
+            echo "failure=$SKIP" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if ! printf '%s  %s\n%s  %s\n' "$SCRIPT_SHA" "$SCRIPT" "$PLAN_SHA" "$FIXER_DIR/plan.json" | sha256sum -c --quiet; then
             echo "failure=the fixer script or plan changed after the plan step" >> "$GITHUB_OUTPUT"
             echo "::error::fixer.py or plan.json changed after the plan step; nothing committed"
