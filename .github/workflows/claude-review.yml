@@ -150,7 +150,8 @@ name: Claude PR Review
 #            lockfile-only diff; a
 #            follow-up --
 #            the bot has reviewed this pull request before -- whose changes
-#            since the last reviewed head touch no risky path's own lines
+#            since the last reviewed head touch no risky path's and no
+#            governing document's own lines
 #            (`followup-risky-only`; the `review:deep` label overrides it, and
 #            no recorded reviewed head to compare never skips). Off by
 #            default, for a caller to turn back on: a docs-only diff under
@@ -176,8 +177,10 @@ name: Claude PR Review
 # No path picks a tier. The risky class (anything under .github/, actions,
 # Mergify, CODEOWNERS, hooks, settings, Dockerfiles, plus any glob the caller
 # adds in `risky-paths`) serves the follow-up rule and `skip-under-lines`
-# alone, and `deep-over-lines` is retired: still accepted, so no caller
-# breaks, and read by nothing.
+# alone. The follow-up rule lets through a push that changes a risky path or
+# a governing document, so a follow-up to a governing document is reviewed,
+# and its tier read from the check, on every run. `deep-over-lines` is
+# retired: still accepted, so no caller breaks, and read by nothing.
 #
 # Whatever the tier, a pull request gets at most `max-reviews` runs, counted
 # by the bot's comments on it; past that every push is skipped as `cap`, the
@@ -283,7 +286,7 @@ on:
         type: string
         default: ''
       followup-risky-only:
-        description: Once the bot has reviewed a pull request, a later push is reviewed only if its changes since the last reviewed head touch a risky path's own lines; the review:deep label still runs; false reviews every follow-up
+        description: Once the bot has reviewed a pull request, a later push is reviewed only if its changes since the last reviewed head touch a risky path's or a governing document's (CLAUDE.md, .claude/rules, ADRs, decisions, curia) own lines; the review:deep label still runs; false reviews every follow-up
         required: false
         type: boolean
         default: true
@@ -487,6 +490,16 @@ jobs:
             done
             return 1
           }
+          # The governing-document (design) class, for the tier's fail-open,
+          # the skip rules and the follow-up rule.
+          design_path() {
+            case "$1" in
+              CLAUDE.md|*/CLAUDE.md|.claude/rules/*|.claude/docs/*|\
+              docs/decisions.md|docs/references.md|docs/adr/*|*.adr.md|docs/curia/*|\
+              .claude/skills/curia/*|.claude/skills/agora/*) return 0 ;;
+            esac
+            return 1
+          }
           files=0 lock=0 design=0 docs=0 risky=0 code=0 lines=0
           while IFS=$'\t' read -r add del f; do
             [ -n "$f" ] || continue
@@ -499,12 +512,9 @@ jobs:
               package-lock.json|*/package-lock.json|npm-shrinkwrap.json|yarn.lock|pnpm-lock.yaml|\
               Cargo.lock|poetry.lock|uv.lock|Pipfile.lock|Gemfile.lock|composer.lock|go.sum|flake.lock)
                 lock=$((lock + 1)) ;;
-              CLAUDE.md|*/CLAUDE.md|.claude/rules/*|.claude/docs/*|\
-              docs/decisions.md|docs/references.md|docs/adr/*|*.adr.md|docs/curia/*|\
-              .claude/skills/curia/*|.claude/skills/agora/*)
-                design=$((design + 1)) ;;
               *)
-                if risky_path "$f"; then risky=$((risky + 1))
+                if design_path "$f"; then design=$((design + 1))
+                elif risky_path "$f"; then risky=$((risky + 1))
                 else
                   case "$f" in
                     *.md|*.markdown|*.rst|LICENSE|LICENSE.*) docs=$((docs + 1)) ;;
@@ -517,8 +527,9 @@ jobs:
           # risky arm. quotepath=off keeps non-ASCII paths literal.
           done < <(git -c core.quotepath=off diff --no-renames --numstat "$mb" HEAD)
 
-          # The risky lines changed since the last reviewed head: each risky
-          # path in the PR's diff then or now, its changed lines against its
+          # The risky and governing lines changed since the last reviewed
+          # head: each risky or governing-document path in the PR's diff then
+          # or now, its changed lines against its
           # own merge base compared the way the fingerprint compares the
           # whole diff, so a rebase or an update from main moves nothing.
           # `unknown` when no reviewed head is recorded or it is unfetchable.
@@ -531,7 +542,7 @@ jobs:
              && mbb=$(git merge-base "origin/$BASE" "$LAST"); then
             pushed_risky=0
             while IFS= read -r f; do
-              risky_path "$f" || continue
+              risky_path "$f" || design_path "$f" || continue
               [ "$(own "$mbb" "$LAST" "$f")" = "$(own "$mb" HEAD "$f")" ] || pushed_risky=$((pushed_risky + 1))
             done < <({ git -c core.quotepath=off diff --no-renames --name-only "$mbb" "$LAST"
                        git -c core.quotepath=off diff --no-renames --name-only "$mb" HEAD; } | sort -u)
@@ -559,7 +570,7 @@ jobs:
           case " $LABELS " in *" review:deep "*) deep_label=true ;; *) deep_label=false ;; esac
           if [ "$decision" != skip ] && [ "$FOLLOWUP_RISKY_ONLY" = true ] && [ "$deep_label" = false ] \
              && [ "$pushed_risky" = 0 ]; then
-            decision=skip reason="follow-up: no risky path changed since the last reviewed head (${LAST:0:7})"
+            decision=skip reason="follow-up: no risky path or governing document changed since the last reviewed head (${LAST:0:7})"
           fi
           if [ "$decision" != skip ] && [ "$reviews" != unknown ] && [ "$MAX_REVIEWS" -gt 0 ] && [ "$reviews" -ge "$MAX_REVIEWS" ]; then
             decision=skip reason="cap: $reviews reviews already on this PR (at most $MAX_REVIEWS)"
