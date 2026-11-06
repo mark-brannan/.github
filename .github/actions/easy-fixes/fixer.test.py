@@ -39,7 +39,7 @@ class Repo:
         for p, t in files.items():
             f = Path(self.root, p)
             f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_bytes(t.encode())
+            f.write_bytes(t.encode() if isinstance(t, str) else t)
         for cmd in (["init", "-q"], ["add", "-A"],
                     ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
                      "commit", "-qm", "base"]):
@@ -173,6 +173,16 @@ class Plan(unittest.TestCase):
         self.assertEqual((st["T3"]["start"], st["T3"]["end"]), (5, 5))
         self.assertEqual(st["T4"]["status"], "left")
 
+    def test_a_file_the_merge_moved_is_not_taken(self):
+        r = Repo({"a.txt": "1\n", "b.txt": "1\n"})
+        Path(r.tmp("moved.txt")).write_text("a.txt\n")
+        Path(r.tmp("threads.json")).write_text(json.dumps(
+            [node(1, "a.txt", 1, fence("A\n")), node(2, "b.txt", 1, "🤖 [nit] [easy] x")]))
+        res = r.run("plan", "--threads", r.tmp("threads.json"), "--head", HEAD, "--root", r.root,
+                    "--moved", r.tmp("moved.txt"))
+        self.assertEqual([t["status"] for t in res], ["not-taken", "agent"])
+        self.assertEqual(r.read("a.txt"), "1\n")
+
     def test_overlap_out_of_range_and_left_side_are_not_taken(self):
         r = Repo({"a.txt": "1\n2\n3\n"})
         res = r.plan([node(1, "a.txt", 2, fence("x\n")), node(2, "a.txt", 3, fence("y\n"), start=2),
@@ -272,6 +282,198 @@ class Workflow(unittest.TestCase):
         self.assertLess(update, wf.index('"$SCRIPT" gate'))
         self.assertLess(wf.index('"$SCRIPT" gate'), wf.index("/update-branch"))
         self.assertIn('[ -f "$FIXER_DIR/gate.json" ] || python3 "$SCRIPT" gate', wf[commit:])
+
+
+def g(root, *args):
+    return subprocess.run(["git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@t",
+                           "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *args],
+                          capture_output=True, text=True)
+
+
+def conflicted(base, ours, theirs):
+    """A repo whose HEAD is `ours` with `theirs` (the base branch) merged in
+    and not committed: files map path -> text, None for absent."""
+    r = Repo({p: t for p, t in base.items() if t is not None})
+    g(r.root, "branch", "-M", "head")
+    g(r.root, "checkout", "-qb", "main")
+    for side, branch in ((theirs, "main"), (ours, "head")):
+        g(r.root, "checkout", "-q", branch)
+        for p, t in side.items():
+            f = Path(r.root, p)
+            if t is None:
+                f.unlink(missing_ok=True)
+            else:
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_bytes(t.encode() if isinstance(t, str) else t)
+        g(r.root, "add", "-A")
+        g(r.root, "commit", "-qm", branch)
+    r.head = g(r.root, "rev-parse", "HEAD").stdout.strip()
+    r.base = g(r.root, "rev-parse", "main").stdout.strip()
+    g(r.root, "merge", "--no-ff", "--no-commit", "main")
+    return r
+
+
+class Conflicts(unittest.TestCase):
+    def test_a_small_text_conflict_goes_to_the_model(self):
+        r = conflicted({"a.txt": "1\n2\n"}, {"a.txt": "1\nours\n"}, {"a.txt": "1\ntheirs\n"})
+        res = r.run("conflicts", "--root", r.root)
+        self.assertEqual((res["status"], res["files"], res["hunks"]), ("resolve", ["a.txt"], {"a.txt": 1}))
+
+    def test_a_clean_merge_is_clean(self):
+        r = conflicted({"a.txt": "1\n", "b.txt": "1\n"}, {"a.txt": "2\n"}, {"b.txt": "2\n"})
+        self.assertEqual(r.run("conflicts", "--root", r.root)["status"], "clean")
+
+    def test_more_than_the_limit_escalates(self):
+        n = 6
+        r = conflicted({f"f{i}": "0\n" for i in range(n)}, {f"f{i}": "1\n" for i in range(n)},
+                       {f"f{i}": "2\n" for i in range(n)})
+        res = r.run("conflicts", "--root", r.root)
+        self.assertEqual(res["status"], "escalate")
+        self.assertIn("more than 5 conflicted files (6)", res["rule"])
+        self.assertEqual(r.run("conflicts", "--root", r.root, "--max-files", "6")["status"], "resolve")
+
+    def test_lockfile_generated_binary_and_delete_escalate(self):
+        base = {"package-lock.json": "0\n", "go.sum": "0\n", "vendor/x.go": "0\n",
+                "img.bin": b"\0a", "gone.txt": "0\n", "ok.txt": "0\n"}
+        ours = {"package-lock.json": "1\n", "go.sum": "1\n", "vendor/x.go": "1\n",
+                "img.bin": b"\0b", "gone.txt": None, "ok.txt": "1\n"}
+        theirs = {"package-lock.json": "2\n", "go.sum": "2\n", "vendor/x.go": "2\n",
+                  "img.bin": b"\0c", "gone.txt": "2\n", "ok.txt": "2\n"}
+        r = conflicted(base, ours, theirs)
+        res = r.run("conflicts", "--root", r.root, "--max-files", "9")
+        self.assertEqual(res["status"], "escalate")
+        p = res["problems"]
+        self.assertIn("lockfile", p["package-lock.json"])
+        self.assertIn("lockfile", p["go.sum"])
+        self.assertIn("generated", p["vendor/x.go"])
+        self.assertIn("binary", p["img.bin"])
+        self.assertIn("deleted", p["gone.txt"])
+        self.assertNotIn("ok.txt", p)
+
+    def test_a_file_with_marker_lines_of_its_own_escalates(self):
+        r = conflicted({"t.py": "x\n<<<<<<< sample\n"}, {"t.py": "ours\n<<<<<<< sample\n"},
+                       {"t.py": "theirs\n<<<<<<< sample\n"})
+        res = r.run("conflicts", "--root", r.root)
+        self.assertIn("marker lines of its own", res["problems"]["t.py"])
+
+    def test_a_path_the_action_resets_escalates(self):
+        r = conflicted({"CLAUDE.md": "0\n", ".claude/s.json": "0\n"}, {"CLAUDE.md": "1\n", ".claude/s.json": "1\n"},
+                       {"CLAUDE.md": "2\n", ".claude/s.json": "2\n"})
+        p = r.run("conflicts", "--root", r.root)["problems"]
+        self.assertEqual(set(p), {"CLAUDE.md", ".claude/s.json"})
+        self.assertIn("claude-code-action resets", p["CLAUDE.md"])
+
+    def test_a_linguist_generated_attribute_escalates(self):
+        r = conflicted({"api.ts": "0\n", ".gitattributes": "api.ts linguist-generated\n"},
+                       {"api.ts": "1\n"}, {"api.ts": "2\n"})
+        self.assertIn("generated", r.run("conflicts", "--root", r.root)["problems"]["api.ts"])
+
+
+class Resolved(unittest.TestCase):
+    def setUp(self):
+        self.r = conflicted({"a.txt": "1\n2\n", "b.txt": "1\n"}, {"a.txt": "1\nours\n"},
+                            {"a.txt": "1\ntheirs\n"})
+        Path(self.r.tmp("conflicts.json")).write_text(json.dumps(self.r.run("conflicts", "--root", self.r.root)))
+
+    def check(self, answers="a.txt: kept both lines @someone | piped\n"):
+        Path(self.r.tmp("answers.txt")).write_text(answers)
+        return self.r.run("resolved", "--conflicts", self.r.tmp("conflicts.json"),
+                          "--answers", self.r.tmp("answers.txt"), "--root", self.r.root)
+
+    def test_a_clean_resolution_passes_with_its_note(self):
+        self.r.write("a.txt", "1\nours\ntheirs\n")
+        res = self.check()
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["notes"]["a.txt"], "kept both lines @\u200bsomeone \\| piped")
+
+    def test_markers_left_escalate(self):
+        res = self.check()
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["rule"], "the model left a conflict unresolved")
+
+    def test_an_edit_outside_the_conflict_goes_back_to_the_merge(self):
+        self.r.write("a.txt", "1\nours\ntheirs\n")
+        self.r.write("b.txt", "edited\n")
+        res = self.check()
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["reverted"], ["b.txt"])
+        self.assertEqual(self.r.read("b.txt"), "1\n")
+
+    def test_a_deleted_conflicted_file_fails(self):
+        os.unlink(Path(self.r.root, "a.txt"))
+        self.assertEqual(self.check()["problems"], {"a.txt": "the model deleted it"})
+
+
+class MergeTree(unittest.TestCase):
+    def test_entries_rebuild_the_merged_tree_on_the_base(self):
+        r = conflicted({"a.txt": "1\n2\n", "keep.txt": "0\n", "del.txt": "0\n"},
+                       {"a.txt": "1\nours\n", "del.txt": None, "new.txt": "n\n"},
+                       {"a.txt": "1\ntheirs\n", "keep.txt": "base\n"})
+        r.write("a.txt", "1\nours\ntheirs\n")
+        g(r.root, "add", "a.txt")
+        g(r.root, "commit", "-qm", "merge")
+        res = r.run("merge-tree", "--root", r.root, "--base", r.base, "--head", r.head)
+        by = {e["path"]: e for e in res["entries"]}
+        self.assertEqual(set(by), {"a.txt", "del.txt", "new.txt"})
+        self.assertIsNone(by["del.txt"]["sha"])
+        # Only the resolved blob is new to the server; new.txt is the head's.
+        self.assertEqual(res["upload"], ["a.txt"])
+        # Replaying the entries on the base's tree gives the merged tree.
+        idx = r.tmp("idx")
+        env = {**os.environ, "GIT_INDEX_FILE": idx}
+        subprocess.run(["git", "-C", r.root, "read-tree", res["base_tree"]], env=env, check=True)
+        for e in res["entries"]:
+            if e["sha"] is None:
+                subprocess.run(["git", "-C", r.root, "update-index", "--force-remove", e["path"]], env=env, check=True)
+            else:
+                subprocess.run(["git", "-C", r.root, "update-index", "--add", "--cacheinfo",
+                                f"{e['mode']},{e['sha']},{e['path']}"], env=env, check=True)
+        tree = subprocess.run(["git", "-C", r.root, "write-tree"], env=env, capture_output=True,
+                              text=True, check=True).stdout.strip()
+        self.assertEqual(tree, res["tree"])
+
+
+class MergeComment(unittest.TestCase):
+    def comment(self, state, **kw):
+        d = tempfile.mkdtemp()
+        Path(d, "s.json").write_text(json.dumps(state))
+        args = ["python3", str(SCRIPT), "merge-comment", "--state", f"{d}/s.json", "--base", "main",
+                "--sign", SIGN, "--marker", "<!-- m -->", "--out", f"{d}/c.md"]
+        for k, v in kw.items():
+            args += [f"--{k}", v]
+        subprocess.run(args, check=True)
+        return Path(d, "c.md").read_text()
+
+    def test_escalation_names_the_files_and_the_rule(self):
+        body = self.comment({"status": "escalate", "files": ["yarn.lock", "a.txt"],
+                             "rule": "a conflicted file the fixer leaves to the author",
+                             "problems": {"yarn.lock": "a lockfile, regenerated rather than merged"}})
+        self.assertIn("did not resolve", body)
+        self.assertIn("| `yarn.lock` | a lockfile", body)
+        self.assertIn("| `a.txt` | conflicted |", body)
+        self.assertTrue(body.rstrip().endswith(SIGN))
+        self.assertIn("<!-- m -->", body)
+
+    def test_success_and_push_failure(self):
+        state = {"ok": True, "files": ["a.txt"], "notes": {"a.txt": "kept both"}}
+        self.assertIn("in abc1234 and resolved", self.comment(state, sha="abc1234"))
+        body = self.comment(state, failure="the branch moved")
+        self.assertIn("could not push the merge: the branch moved", body)
+        self.assertIn("| `a.txt` | kept both |", body)
+
+
+class ConflictWorkflow(unittest.TestCase):
+    def test_nothing_is_pushed_before_both_agents_and_the_token(self):
+        wf = (HERE.parents[1] / "workflows" / "claude-review.yml").read_text()
+        order = [wf.index(x) for x in ("name: Merge the base in", "id: conflict-agent",
+                                         "name: Check the resolution", "id: plan", "id: agent\n",
+                                         "id: token", "name: Push the merge",
+                                         "name: Gate the fixes and update", "name: Commit the fixes")]
+        self.assertEqual(order, sorted(order))
+        # The merge is never a rebase, and never forced over a moved branch.
+        fixer = wf[wf.index("  fixer:\n"):]
+        self.assertNotIn("rebase", fixer.replace("never a rebase", ""))
+        self.assertIn("-F force=false", fixer)
 
 
 class Report(unittest.TestCase):
