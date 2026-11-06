@@ -144,14 +144,16 @@ def review_lines(lines):
     """The review's own stretch of the job log. Each check is its own
     claude-code-action invocation, opened by a "Run anthropics/claude-code-action"
     group, with its own init, result and claude_args. The review is the one
-    whose inputs echo `track_progress: true`, wherever in the job it runs. A
-    log without that echo is read from its first invocation on."""
+    whose inputs echo `track_progress: true`, wherever it runs; the review step
+    has echoed it since the shared workflow began. A log whose invocations
+    all lack it holds no review (the checks job, the fixer's), so none of it
+    is the review's. A log with no invocation group at all is read whole."""
     starts = [i for i, ln in enumerate(lines) if ACTION.match(ln)]
     for k, i in enumerate(starts):
         end = starts[k + 1] if k + 1 < len(starts) else len(lines)
         if any(TRACK.match(ln) for ln in lines[i:end]):
             return lines[i:end]
-    return lines[starts[0]:] if starts else lines
+    return [] if starts else lines
 
 
 def parse_log(text):
@@ -362,6 +364,12 @@ def rows_of(repo, run, index=None):
                      "conclusion": (job.get("conclusion") or "") if log is not None else "log unavailable",
                      "started": job.get("started_at") or "", "ended": job.get("completed_at") or "",
                      "ran": facts["cost"] is not None, **facts})
+    # Triage is a job of its own, ahead of the review: its tier and path
+    # classes are the run's, so every job's row carries them.
+    run_facts = {k: next((r[k] for r in rows if r[k]), "") for k in ("tier", "why", "paths")}
+    for r in rows:
+        for k, v in run_facts.items():
+            r[k] = r[k] or v
     return rows
 
 
