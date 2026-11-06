@@ -89,6 +89,8 @@ TRIAGE = re.compile(r"^##\[notice\]review triage: (skip|default|deep) \((.*)\)\s
 ARGS = re.compile(r"^\s+claude_args: ")
 EFFORT = re.compile(r"--effort\s+([a-z]+)")
 CLASSES = re.compile(r"^\s+CLASSES: ((?:[a-z]+=\d+ ?)+)$")
+ACTION = re.compile(r"^##\[group\]Run anthropics/claude-code-action@")
+TRACK = re.compile(r"^\s+track_progress: true\s*$")
 FIXED = re.compile(r"\b(fixed|done|addressed|applied|resolved in|in [0-9a-f]{7,40})\b", re.I)
 DECLINED = re.compile(r"\b(no|not|won't|wontfix|disagree|by design|intended|intentional|keep(ing)?|kept|"
                       r"revers(al|ed)|out of scope|stays?)\b", re.I)
@@ -138,14 +140,37 @@ def gh_json(*args, soft=False):
         die("gh %s: not JSON" % " ".join(args[:3]))
 
 
+def review_lines(lines):
+    """The review's own stretch of the job log. Each check is its own
+    claude-code-action invocation, opened by a "Run anthropics/claude-code-action"
+    group, with its own init, result and claude_args. The review is the one
+    whose inputs echo `track_progress: true`, wherever it runs; the review step
+    has echoed it since the shared workflow began. A log whose invocations
+    all lack it holds no review (the checks job, the fixer's), so none of it
+    is the review's. A log with no invocation group at all is read whole."""
+    starts = [i for i, ln in enumerate(lines) if ACTION.match(ln)]
+    for k, i in enumerate(starts):
+        end = starts[k + 1] if k + 1 < len(starts) else len(lines)
+        if any(TRACK.match(ln) for ln in lines[i:end]):
+            return lines[i:end]
+    return [] if starts else lines
+
+
 def parse_log(text):
     """The run's model, cost, turns, wall time, tier and effort, from one job log.
-    The job runs the review first and then the checks beside it, each its own
-    action invocation with its own init, result and claude_args, so only the
-    first of each is the review's."""
+    The tier and path classes come from the triage and gate steps; the rest
+    from the review's own invocation (review_lines), the first of each there."""
     lines = [STAMP.sub("", ln) for ln in text.splitlines()]
     out = {"model": "", "cost": None, "turns": None, "ms": None, "tier": "", "why": "", "effort": "",
            "paths": ""}
+    for ln in lines:
+        m = TRIAGE.search(ln)
+        if m:
+            out["tier"], out["why"] = m.group(1), m.group(2)
+        m = CLASSES.search(ln)
+        if m:
+            out["paths"] = "+".join(k for k, v in (kv.split("=") for kv in m.group(1).split()) if v != "0") or "none"
+    lines = review_lines(lines)
     i = 0
     seen_args = False
     while i < len(lines):
@@ -166,9 +191,6 @@ def parse_log(text):
                 out["ms"] = msg.get("duration_ms")
             i = j + 1
             continue
-        m = TRIAGE.search(ln)
-        if m:
-            out["tier"], out["why"] = m.group(1), m.group(2)
         # The first claude_args line is the review's, whatever it holds: a
         # default-tier review passes no --effort, and a later check's must
         # not stand in for it.
@@ -176,9 +198,6 @@ def parse_log(text):
             seen_args = True
             m = EFFORT.search(ln)
             out["effort"] = m.group(1) if m else ""
-        m = CLASSES.search(ln)
-        if m:
-            out["paths"] = "+".join(k for k, v in (kv.split("=") for kv in m.group(1).split()) if v != "0") or "none"
         i += 1
     return out
 
@@ -345,6 +364,12 @@ def rows_of(repo, run, index=None):
                      "conclusion": (job.get("conclusion") or "") if log is not None else "log unavailable",
                      "started": job.get("started_at") or "", "ended": job.get("completed_at") or "",
                      "ran": facts["cost"] is not None, **facts})
+    # Triage is a job of its own, ahead of the review: its tier and path
+    # classes are the run's, so every job's row carries them.
+    run_facts = {k: next((r[k] for r in rows if r[k]), "") for k in ("tier", "why", "paths")}
+    for r in rows:
+        for k, v in run_facts.items():
+            r[k] = r[k] or v
     return rows
 
 

@@ -90,6 +90,79 @@ class ParseLog(unittest.TestCase):
 }'''))
         self.assertEqual((f["model"], f["cost"], f["turns"], f["effort"]), ("claude-opus-5-5", 0.2222, 7, "high"))
 
+    def test_the_review_is_the_invocation_that_tracks_progress_wherever_it_runs(self):
+        def run(model, effort, cost, track):
+            return '''##[group]Run anthropics/claude-code-action@d535f51
+with:
+  track_progress: %s
+  claude_args: --model "%s"%s
+##[endgroup]
+{
+  "type": "system",
+  "subtype": "init",
+  "model": "%s"
+}
+{
+  "type": "result",
+  "subtype": "success",
+  "total_cost_usd": %s
+}''' % (track, model, effort and " --effort " + effort, model, cost)
+        triage = "##[notice]review triage: deep (2 risky path(s): anything under .github/)\n"
+        review = run("claude-opus-5-5", "high", 0.9, "true")
+        checks = [run("claude-sonnet-5-5", "medium", 0.35, "false"), run("claude-haiku-5-5", "", 0.05, "false")]
+        for log in (stamped(triage + "\n".join(checks + [review])), stamped(triage + "\n".join([review] + checks))):
+            f = rm.parse_log(log)
+            self.assertEqual((f["model"], f["cost"], f["effort"], f["tier"]), ("claude-opus-5-5", 0.9, "high", "deep"))
+
+    @staticmethod
+    def invocation(model, effort, cost, track):
+        return '''##[group]Run anthropics/claude-code-action@d535f51
+with:
+%s  claude_args: --model "%s"%s
+##[endgroup]
+{
+  "type": "system",
+  "subtype": "init",
+  "model": "%s"
+}
+{
+  "type": "result",
+  "subtype": "success",
+  "total_cost_usd": %s
+}''' % ("  track_progress: true\n" if track else "", model, effort and " --effort " + effort, model, cost)
+
+    def test_the_review_jobs_own_log_holds_one_invocation_and_no_triage(self):
+        f = rm.parse_log(stamped(self.invocation("claude-opus-5-5", "high", 0.9, True)))
+        self.assertEqual((f["model"], f["cost"], f["effort"], f["tier"], f["paths"]),
+                         ("claude-opus-5-5", 0.9, "high", "", ""))
+
+    def test_a_job_with_no_tracked_invocation_is_not_a_review(self):
+        # The checks job (two untracked invocations), the fixer's (one).
+        for log in ("\n".join([self.invocation("claude-sonnet-5-5", "medium", 0.2, False),
+                                 self.invocation("claude-sonnet-5-5", "medium", 0.25, False)]),
+                    self.invocation("claude-haiku-5-5", "", 0.05, False)):
+            f = rm.parse_log(stamped(log))
+            self.assertEqual((f["model"], f["cost"], f["effort"]), ("", None, ""))
+
+    def test_every_jobs_row_carries_the_triage_jobs_tier_and_paths(self):
+        logs = {1: stamped("##[notice]review triage: deep (2 risky path(s): anything under .github/)\n"
+                           "env:\n  CLASSES: lock=0 design=0 docs=1 risky=2 code=0"),
+                2: stamped(self.invocation("claude-opus-5-5", "high", 0.9, True)),
+                3: stamped(self.invocation("claude-sonnet-5-5", "medium", 0.2, False))}
+        saved = rm.gh_json, rm.gh, rm.pr_of
+        try:
+            rm.gh_json = lambda *a, **k: {"jobs": [{"id": i, "name": "review / %s" % n} for i, n in
+                                                   ((1, "triage"), (2, "review"), (3, "checks"))]}
+            rm.gh = lambda *a, **k: logs[int(a[2].rsplit("/", 2)[1])]
+            rm.pr_of = lambda *a, **k: 7
+            rows = rm.rows_of("o/r", {"id": 99})
+        finally:
+            rm.gh_json, rm.gh, rm.pr_of = saved
+        self.assertEqual([(r["job"], r["ran"], r["cost"], r["tier"], r["paths"]) for r in rows],
+                         [("review / triage", False, None, "deep", "docs+risky"),
+                          ("review / review", True, 0.9, "deep", "docs+risky"),
+                          ("review / checks", False, None, "deep", "docs+risky")])
+
     def test_default_tier_review_takes_no_effort_from_a_later_check(self):
         f = rm.parse_log(stamped('''  claude_args: --model "claude-sonnet-5-5"
 {

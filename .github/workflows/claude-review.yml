@@ -11,10 +11,13 @@ name: Claude PR Review
 # it (see that job). The merge button, which the rulesets gate on
 # `ci-gate / gate` alone, stays the owner's.
 #
-# The review job: a chain of checks behind one triage. Each check is its own
-# headless Claude with its own brief and model, run from the skills in the
-# seeded $HOME/.claude (mark-brannan/claude), so a skill improves every
-# repository's review the day it merges there:
+# Three checks behind one triage. Each is its own headless Claude with its
+# own brief and model, run from the skills in the seeded $HOME/.claude
+# (mark-brannan/claude), so a skill improves every repository's review the
+# day it merges there. The `triage` job decides for all three; the `review`
+# job runs critical-review and the `checks` job the other two, side by side,
+# so the review's threads land as soon as it finishes and the fixer starts on
+# them at once:
 #
 #   critical-review  the review itself: tagged findings as inline threads and
 #                    one summary comment, held to the repository's own
@@ -175,15 +178,15 @@ name: Claude PR Review
 # CLAUDE_CODE_OAUTH_TOKEN`). Until that secret exists the review step skips
 # with a warning rather than failing every pull request in the repository.
 #
-# A second job, `fixer`, follows the review: it merges the base into a branch
-# that conflicts with it, and behind a review that posted it applies the
-# review's [easy] findings, committing both as the agent App (see the job). It needs
+# The `fixer` job follows the review: it merges the base into a branch that
+# conflicts with it, and behind a review that posted it applies the review's
+# [easy] findings, committing both as the agent App (see the job). It needs
 # AGENT_BOT_APP_ID and AGENT_BOT_PRIVATE_KEY passed as secrets, and the App
 # needs Contents: write; without the secrets it skips with a warning. A
 # `fixer:skip` label keeps it off one pull request. The same App keeps the
 # checks' full reports in the private state repository, so it needs
 # Contents: write there too. A report is never silently lost: without the
-# secrets, or when a report cannot be pushed after three tries, the review
+# secrets, or when a report cannot be pushed after three tries, the checks
 # job fails red, saying which, and a re-run (with the secrets passed) pushes it.
 
 on:
@@ -265,7 +268,7 @@ on:
         type: string
         default: ''
       timeout-minutes:
-        description: Wall clock cap on the job, all three checks together; the runaway backstop, not a target
+        description: Wall clock cap on each of the review and checks jobs; the runaway backstop, not a target
         required: false
         type: number
         default: 30
@@ -293,75 +296,44 @@ env:
     .claude/hooks/* .claude/settings.json .claude/settings.*.json
     Dockerfile */Dockerfile Dockerfile.* */Dockerfile.*
 
+# Queue rather than cancel: a cancelled review has already spent its tokens
+# and never records its fingerprint, so the replacement run would spend them
+# again. The common trigger here is a Mergify update, which queues behind the
+# running one and then skips on the fingerprint. The group is the whole run,
+# not one job: triage reads the fingerprint the record job saves at the end.
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
 jobs:
-  review:
+  # The decision every other job reads, made once per run: the content
+  # fingerprint, the tier and reviewer family, the budget probe, and which
+  # checks run. Shell only: a checkout and a few API calls, no agent.
+  triage:
     # Skip drafts, and skip fork pull requests -- forks cannot read the
     # secret, so a run there only produces a red X that means nothing.
     if: >-
       !github.event.pull_request.draft &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    # No --max-turns, deliberately: it produced false reds and no true ones,
-    # failing a run after the review had already been posted. Wall clock is
-    # the resource worth bounding, and it cannot discard work that landed.
-    # The default covers three checks in a row, about ten minutes each.
-    timeout-minutes: ${{ inputs.timeout-minutes }}
-    # Queue rather than cancel: a cancelled review has already spent its
-    # tokens and never records its fingerprint, so the replacement run would
-    # spend them again. The common trigger here is a Mergify update, which
-    # queues behind the running review and then skips on the fingerprint.
-    concurrency:
-      group: claude-review-${{ github.event.pull_request.number }}
-      cancel-in-progress: false
-    # The fixer runs only behind a review this run actually posted.
+    timeout-minutes: 5
+    # The gate's two switches -- `run` for the review, `checks` for
+    # maxims-check and arete-check -- and what the jobs behind it pass on.
     outputs:
-      posted: ${{ steps.posted.outputs.posted }}
-      # arete-check's reading on this run: true (not yet), false (meets the
-      # standard), broken (it ran and left no readable arete.json
-      # recommendation), or empty when it did not run. Names the hold job.
-      hold: ${{ steps.verdict.outputs.hold }}
-    # The seeded dotfiles hooks include a Stop hook that commits and pushes a
-    # dirty Claude-made checkout as the session's salvaged work. On this
-    # runner that checkout is dirty by construction -- claude-code-action
-    # restores the base branch's .claude/ paths over the pull request's --
-    # and git holds the Claude App's token, so the hook fast-forwarded main's
-    # .claude/ back onto pull request branches as "wip: session ... at Stop"
-    # by claude[bot] (mark-brannan/dotfiles#196). The hook now refuses under
-    # GITHUB_ACTIONS on its own; this is the switch it has always honoured,
-    # set here so a runner never depends on which version of the hook main
-    # happens to seed.
-    env:
-      CLAUDE_STOP_COMMIT: off
-      # What the review needs whatever the caller adds: the skill, its
-      # comment tools, the two scripts it runs from the seeded home, and the
-      # read-only git it uses to hold the PR to the base's instructions
-      # rather than the head's.
-      # `allowed-tools` (the npm grants unless the caller says otherwise)
-      # extends this, the way `allowed-bots` extends the shared bots; what
-      # executes the PR's own code stays the caller's choice.
-      REVIEW_TOOLS: Skill,mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(python3 ~/.claude/lib/critical_review.py reviewer:*),Bash(~/.claude/bin/pr-blockers:*),Bash(git fetch origin:*),Bash(git show origin/:*),Bash(git diff origin/:*)
-      # Every refused call in an execution file, for each check's denial step
-      # (mark-brannan/.github#97): the tool error with its call, the
-      # permission denials the result carries, and any hook that denied,
-      # blocked or exited non-zero, with its stderr.
-      DENIALS: |
-        ([.[] | select(.type == "assistant") | .message.content[]? | select(.type == "tool_use")
-          | {key: .id, value: {name, input}}] | from_entries) as $calls
-        | ( .[] | select(.type == "user") | .message.content[]?
-            | select(type == "object" and .type == "tool_result" and .is_error == true)
-            | ($calls[.tool_use_id] // {}) as $c
-            | "tool error: \($c.name // "?") \($c.input // {} | tostring | .[0:200]) -> \(.content | tostring | .[0:500])" ),
-          ( .[] | select(.type == "result") | .permission_denials[]?
-            | "permission denial: \(.tool_name) \(.tool_input | tostring | .[0:200])" ),
-          ( .[] | select(.type == "system" and ((.subtype // "") | startswith("hook")))
-            | (((.output // "") | tostring) + ((.stdout // "") | tostring)) as $out
-            | select(($out | test("\"deny\"|\"block\"")) or ((.exit_code // 0) != 0))
-            | "hook: \(.hook_name // .hook_event // "?") exit \(.exit_code // "?") -> \(($out + ((.stderr // "") | tostring)) | .[0:500])" )
+      run: ${{ steps.gate.outputs.run }}
+      checks: ${{ steps.gate.outputs.checks }}
+      decision: ${{ steps.triage.outputs.decision }}
+      model: ${{ steps.triage.outputs.model }}
+      effort-arg: ${{ steps.triage.outputs.effort-arg }}
+      family: ${{ steps.triage.outputs.family }}
+      coders: ${{ steps.triage.outputs.coders }}
+      family-why: ${{ steps.triage.outputs.family-why }}
+      fp: ${{ steps.fp.outputs.id }}
+      since: ${{ steps.fp.outputs.since }}
     permissions:
       contents: read
-      pull-requests: write
+      pull-requests: read
       issues: read
-      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -743,6 +715,53 @@ jobs:
             echo "| reviews so far | $REVIEWS |"
             echo "| plan usage | $usage |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # critical-review, the review itself. The fixer needs only this job, so
+  # it starts on the review's [easy] threads the moment they land; the two
+  # checks run beside it in `checks`, never ahead of it.
+  review:
+    needs: triage
+    if: needs.triage.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    # No --max-turns, deliberately: it produced false reds and no true ones,
+    # failing a run after the review had already been posted. Wall clock is
+    # the resource worth bounding, and it cannot discard work that landed.
+    # The same cap holds the checks job beside it.
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # The fixer runs only behind a review this run actually posted.
+    outputs:
+      posted: ${{ steps.posted.outputs.posted }}
+    # The seeded dotfiles hooks include a Stop hook that commits and pushes a
+    # dirty Claude-made checkout as the session's salvaged work. On this
+    # runner that checkout is dirty by construction -- claude-code-action
+    # restores the base branch's .claude/ paths over the pull request's --
+    # and git holds the Claude App's token, so the hook fast-forwarded main's
+    # .claude/ back onto pull request branches as "wip: session ... at Stop"
+    # by claude[bot] (mark-brannan/dotfiles#196). The hook now refuses under
+    # GITHUB_ACTIONS on its own; this is the switch it has always honoured,
+    # set here so a runner never depends on which version of the hook main
+    # happens to seed.
+    env:
+      CLAUDE_STOP_COMMIT: off
+      # What the review needs whatever the caller adds: the skill, its
+      # comment tools, the two scripts it runs from the seeded home, and the
+      # read-only git it uses to hold the PR to the base's instructions
+      # rather than the head's.
+      # `allowed-tools` (the npm grants unless the caller says otherwise)
+      # extends this, the way `allowed-bots` extends the shared bots; what
+      # executes the PR's own code stays the caller's choice.
+      REVIEW_TOOLS: Skill,mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(python3 ~/.claude/lib/critical_review.py reviewer:*),Bash(~/.claude/bin/pr-blockers:*),Bash(git fetch origin:*),Bash(git show origin/:*),Bash(git diff origin/:*)
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       # The fail-closed PreToolUse hooks deny every Bash call unless they
       # exist under $HOME -- a bare runner never has them, so the review
       # agent could read the diff but not execute anything. The
@@ -754,7 +773,7 @@ jobs:
       # (mark-brannan/.github#18, README "Nothing here is ever pinned"). Don't pin this.
       - name: Seed $HOME with Claude config from dotfiles
         id: claude-config
-        if: steps.gate.outputs.run == 'true' && inputs.seed-home
+        if: inputs.seed-home
         uses: mark-brannan/dotfiles/.github/actions/claude-config@main
 
       # Verified against the action's `complete` output, not its exit code
@@ -764,7 +783,6 @@ jobs:
       # below claims no more than that.
       - name: Verify the seed
         id: seed
-        if: steps.gate.outputs.run == 'true'
         env:
           SEED_HOME: ${{ inputs.seed-home }}
           SEED_COMPLETE: ${{ steps.claude-config.outputs.complete }}
@@ -781,7 +799,7 @@ jobs:
           fi
 
 
-      - if: steps.gate.outputs.run == 'true' && inputs.node-version != ''
+      - if: inputs.node-version != ''
         uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node-version }}
@@ -792,7 +810,7 @@ jobs:
       # Claude Code refuses to add a marketplace whose source differs from
       # the one settings declares for that name. Restate the seeded entry as
       # the same git URL the action adds, so the two agree.
-      - if: steps.gate.outputs.run == 'true' && inputs.seed-home
+      - if: inputs.seed-home
         name: Match the seeded languette marketplace to the action's URL
         run: |
           s="$HOME/.claude/settings.json"
@@ -803,8 +821,7 @@ jobs:
       # The writing rubric lives once, in mark-brannan/claude. Fetched here,
       # before the agent starts, so the agent gets a Read of one file and no
       # `gh api` of its own. A failed fetch only costs the prose check.
-      - if: steps.gate.outputs.run == 'true'
-        name: Fetch the writing rubric
+      - name: Fetch the writing rubric
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -816,8 +833,7 @@ jobs:
       # re-review on a new push adds only what is new. Fetched here for the
       # same reason as the rubric: a Read for the agent, no `gh api` of its
       # own. A failed fetch only costs the de-duplication.
-      - if: steps.gate.outputs.run == 'true'
-        name: Fetch the review threads already raised
+      - name: Fetch the review threads already raised
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -857,16 +873,15 @@ jobs:
       # generic brief. The caller's `prompt` follows either, as extra brief,
       # never in place of it. Built in shell so every input arrives through
       # env.
-      - if: steps.gate.outputs.run == 'true'
-        name: Compose the review brief
+      - name: Compose the review brief
         id: brief
         env:
           SEED_HOME: ${{ inputs.seed-home }}
           CALLER_PROMPT: ${{ inputs.prompt }}
           PR_URL: ${{ github.event.pull_request.html_url }}
-          FAMILY: ${{ steps.triage.outputs.family }}
-          CODERS: ${{ steps.triage.outputs.coders }}
-          FAMILY_WHY: ${{ steps.triage.outputs.family-why }}
+          FAMILY: ${{ needs.triage.outputs.family }}
+          CODERS: ${{ needs.triage.outputs.coders }}
+          FAMILY_WHY: ${{ needs.triage.outputs.family-why }}
         run: |
           set -euo pipefail
           d="BRIEF_$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -935,7 +950,6 @@ jobs:
       # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB needs bubblewrap, which the runner lacks.
       # Same install the action does itself for allowed_non_write_users.
       - name: Install bubblewrap for the env scrub
-        if: steps.gate.outputs.run == 'true'
         run: |
           for i in 1 2 3; do
             sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends bubblewrap socat && break
@@ -958,8 +972,7 @@ jobs:
       # The guards come as the languette plugin. The seeded settings.json
       # enables it, but enabling installs nothing: a headless run on a bare
       # runner has no plugin cache, so the action installs it here.
-      - if: steps.gate.outputs.run == 'true'
-        id: review
+      - id: review
         uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         # Strip the Anthropic and cloud credentials from every shell the
         # agent starts, so no Bash call finds the OAuth token in the shell's
@@ -1012,7 +1025,7 @@ jobs:
           # (auto, for interactive sessions: mark-brannan/claude#349), which
           # `claude -p` reads. The step below proves which mode ran.
           claude_args: |
-            --model "${{ steps.triage.outputs.model }}" ${{ steps.triage.outputs.effort-arg }}
+            --model "${{ needs.triage.outputs.model }}" ${{ needs.triage.outputs.effort-arg }}
             --permission-mode default
             --allowedTools "${{ env.REVIEW_TOOLS }}${{ inputs.allowed-tools && format(',{0}', inputs.allowed-tools) || '' }},Read(.writing-rubric.md),Read(.prior-threads.json)"
             --disallowedTools "Read(//proc/**),Read(./.git/**)"
@@ -1052,28 +1065,124 @@ jobs:
       # logs for its judge, in the job summary and the headless-run artifact.
       # Recorded straight after each check: every invocation of the action
       # writes the same execution file, so the next one overwrites it.
-      - if: always() && steps.gate.outputs.run == 'true' && steps.review.outputs.execution_file != ''
+      - if: always() && steps.review.outputs.execution_file != ''
         name: Record the cost of the review
         uses: mark-brannan/.github/.github/actions/headless-run-cost@main
         with:
           execution-file: ${{ steps.review.outputs.execution_file }}
           what: claude-review
-          model: ${{ steps.triage.outputs.model }}
+          model: ${{ needs.triage.outputs.model }}
           pr: ${{ github.event.pull_request.number }}
-          fields: '{"head_sha":"${{ github.event.pull_request.head.sha }}","tier":"${{ steps.triage.outputs.decision }}"}'
+          fields: '{"head_sha":"${{ github.event.pull_request.head.sha }}","tier":"${{ needs.triage.outputs.decision }}"}'
 
-      - if: steps.gate.outputs.run == 'true'
-        name: Confirm a review comment actually landed
+      - name: Confirm a review comment actually landed
         id: posted
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
-          SINCE: ${{ steps.fp.outputs.since }}
+          SINCE: ${{ needs.triage.outputs.since }}
         run: |
           n=$(gh api "repos/${{ github.repository }}/issues/$PR/comments" --paginate \
                 --jq "[.[] | select(.user.login == \"claude[bot]\" and .created_at >= \"$SINCE\")] | length")
           echo "posted=$([ "$n" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           [ "$n" -gt 0 ] || echo "::warning::no review comment posted; fingerprint not recorded"
+
+      - if: always() && hashFiles('headless-run.jsonl') != ''
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: headless-run-review
+          # The cost rows only; the record job joins them into the run's
+          # headless-run artifact.
+          path: headless-run.jsonl
+          overwrite: true
+
+  # maxims-check and arete-check, beside the review rather than before or
+  # after it. The three are independent readings of the same diff: neither
+  # check reads the pull request's threads or comments, and the review's
+  # only thread input is fetched before any check and filtered to the bot's
+  # own findings and write-access authors, which the checks' comments, as
+  # github-actions[bot], are not. Order changes no finding, only when the
+  # review's threads land.
+  checks:
+    needs: triage
+    if: needs.triage.outputs.checks == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    outputs:
+      # arete-check's reading on this run: true (not yet), false (meets the
+      # standard), broken (it ran and left no readable arete.json
+      # recommendation), or empty when it did not run. Names the hold job.
+      hold: ${{ steps.verdict.outputs.hold }}
+    env:
+      # The seeded Stop hook's off switch; see the review job.
+      CLAUDE_STOP_COMMIT: off
+      # Every refused call in an execution file, for each check's denial step
+      # (mark-brannan/.github#97): the tool error with its call, the
+      # permission denials the result carries, and any hook that denied,
+      # blocked or exited non-zero, with its stderr.
+      DENIALS: |
+        ([.[] | select(.type == "assistant") | .message.content[]? | select(.type == "tool_use")
+          | {key: .id, value: {name, input}}] | from_entries) as $calls
+        | ( .[] | select(.type == "user") | .message.content[]?
+            | select(type == "object" and .type == "tool_result" and .is_error == true)
+            | ($calls[.tool_use_id] // {}) as $c
+            | "tool error: \($c.name // "?") \($c.input // {} | tostring | .[0:200]) -> \(.content | tostring | .[0:500])" ),
+          ( .[] | select(.type == "result") | .permission_denials[]?
+            | "permission denial: \(.tool_name) \(.tool_input | tostring | .[0:200])" ),
+          ( .[] | select(.type == "system" and ((.subtype // "") | startswith("hook")))
+            | (((.output // "") | tostring) + ((.stdout // "") | tostring)) as $out
+            | select(($out | test("\"deny\"|\"block\"")) or ((.exit_code // 0) != 0))
+            | "hook: \(.hook_name // .hook_event // "?") exit \(.exit_code // "?") -> \(($out + ((.stderr // "") | tostring)) | .[0:500])" )
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The seed, its check and the marketplace match, as in the review job
+      # and without its seed-home switch: this job runs only on a seeded
+      # home. A declared DRY break: a reusable workflow runs in the caller's
+      # checkout, so a shared script here would not be there to call. Change
+      # one, change both.
+      - name: Seed $HOME with Claude config from dotfiles
+        id: claude-config
+        uses: mark-brannan/dotfiles/.github/actions/claude-config@main
+
+      - name: Verify the seed
+        id: seed
+        env:
+          SEED_COMPLETE: ${{ steps.claude-config.outputs.complete }}
+        run: |
+          if [ "$SEED_COMPLETE" = "true" ]; then
+            echo "note=\$HOME seeded from mark-brannan/claude (the claude-config action reports a complete install: settings.json landed)" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Claude config seeding reported incomplete -- the checks will run degraded"
+            echo "note=\$HOME seeding was incomplete -- Bash calls may be denied fail-closed or may run unguarded; say so plainly in your output" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Match the seeded languette marketplace to the action's URL
+        run: |
+          s="$HOME/.claude/settings.json"
+          [ -f "$s" ] || exit 0
+          jq 'if .extraKnownMarketplaces.languette then .extraKnownMarketplaces.languette.source = {"source": "git", "url": "https://github.com/mark-brannan/languette.git"} else . end' "$s" > "$s.tmp"
+          mv "$s.tmp" "$s"
+
+      # As in the review job.
+      - name: Install bubblewrap for the env scrub
+        run: |
+          for i in 1 2 3; do
+            sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends bubblewrap socat && break
+            [ "$i" = 3 ] && exit 1
+            sleep 5
+          done
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
 
       # The prompt of each check below never spells the pull request as a URL
       # or owner/repo#n. The seeded home's UserPromptSubmit hook
@@ -1084,17 +1193,18 @@ jobs:
       # itself, in its own Skill call, which no prompt hook reads.
       # The checks write their file outside the checkout, so the directory is
       # made here, not left to the agent's tool or to the later summary step.
-      - if: "!cancelled() && steps.gate.outputs.checks == 'true'"
-        name: Make the checks' output directory
+      - name: Make the checks' output directory
         run: mkdir -p "${{ runner.temp }}/claude-checks"
 
       # maxims-check, on the model and effort its skill's "Run as" names.
       # Headless, so inline rather than in the sub-agent the skill expects;
       # read-only but for the table and its summary, which the steps after
       # arete-check keep and post. Runs whether or not the review landed:
-      # the two are independent readings of the same diff.
-      - if: "!cancelled() && steps.gate.outputs.checks == 'true'"
-        id: maxims
+      # the two are independent readings of the same diff. Each check has
+      # its own wall clock, so a stuck one cannot use up the job's and cost
+      # the other.
+      - id: maxims
+        timeout-minutes: 5
         uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         # Strip the Anthropic and cloud credentials from every shell the
         # agent starts, so no Bash call finds the OAuth token in the shell's
@@ -1150,7 +1260,7 @@ jobs:
             --disallowedTools "Read(//proc/**),Read(./.git/**)"
 
       # The cost row comes from the shared headless-run-cost action.
-      - if: always() && steps.gate.outputs.checks == 'true' && steps.maxims.outputs.execution_file != ''
+      - if: always() && steps.maxims.outputs.execution_file != ''
         name: Record the cost of maxims-check
         id: maxims-cost
         uses: mark-brannan/.github/.github/actions/headless-run-cost@main
@@ -1159,7 +1269,7 @@ jobs:
           what: claude-maxims
           model: claude-sonnet-5-5
           pr: ${{ github.event.pull_request.number }}
-          fields: '{"head_sha":"${{ github.event.pull_request.head.sha }}","tier":"${{ steps.triage.outputs.decision }}"}'
+          fields: '{"head_sha":"${{ github.event.pull_request.head.sha }}","tier":"${{ needs.triage.outputs.decision }}"}'
           summary: 'false'
 
       # Which tool call or hook refused what (mark-brannan/.github#97); the
@@ -1167,7 +1277,7 @@ jobs:
       # denial step but for its env, a declared DRY break: a reusable workflow
       # runs in the caller's checkout, so a shared script here would not be
       # there to call. Change one, change both.
-      - if: always() && steps.gate.outputs.checks == 'true' && steps.maxims.outputs.execution_file != ''
+      - if: always() && steps.maxims.outputs.execution_file != ''
         name: Say what denied maxims-check's calls
         env:
           EXEC: ${{ steps.maxims.outputs.execution_file }}
@@ -1181,8 +1291,9 @@ jobs:
       # arete-check, on the model and effort its skill's "Run as" names,
       # headless and inline like maxims-check. Its brief, summary and
       # recommendation go to the steps below.
-      - if: "!cancelled() && steps.gate.outputs.checks == 'true'"
+      - if: "!cancelled()"
         id: arete
+        timeout-minutes: 5
         uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         # Strip the Anthropic and cloud credentials from every shell the
         # agent starts, so no Bash call finds the OAuth token in the shell's
@@ -1246,7 +1357,7 @@ jobs:
             --allowedTools "Skill,Read(./**),Read(~/.claude/**),Read(/${{ runner.temp }}/claude-checks/**),Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Edit(/${{ runner.temp }}/claude-checks/arete.md)"
             --disallowedTools "Read(//proc/**),Read(./.git/**)"
 
-      - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
+      - if: always() && steps.arete.outputs.execution_file != ''
         name: Record the cost of arete-check
         id: arete-cost
         uses: mark-brannan/.github/.github/actions/headless-run-cost@main
@@ -1255,13 +1366,13 @@ jobs:
           what: claude-arete
           model: claude-sonnet-5-5
           pr: ${{ github.event.pull_request.number }}
-          fields: '{"head_sha":"${{ github.event.pull_request.head.sha }}","tier":"${{ steps.triage.outputs.decision }}"}'
+          fields: '{"head_sha":"${{ github.event.pull_request.head.sha }}","tier":"${{ needs.triage.outputs.decision }}"}'
           summary: 'false'
 
       # Which tool call or hook refused what (mark-brannan/.github#97); the
       # filter is DENIALS, in env:. Changes nothing. Same body as maxims-check's
       # denial step but for its env, a DRY break declared at maxims-check's.
-      - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
+      - if: always() && steps.arete.outputs.execution_file != ''
         name: Say what denied arete-check's calls
         env:
           EXEC: ${{ steps.arete.outputs.execution_file }}
@@ -1278,7 +1389,7 @@ jobs:
       # aims. The token is made here, after both agents have finished, for
       # that one repository, and only the plain step below reads it; no
       # agent step ever has it in its environment.
-      - if: always() && steps.gate.outputs.checks == 'true'
+      - if: always()
         name: Check the agent App is configured to keep the reports
         id: stateapp
         env:
@@ -1295,7 +1406,7 @@ jobs:
       # continue-on-error: an App not installed on the state repository fails
       # here, and the step below turns that into its own clear red, after
       # the reports are written on the runner.
-      - if: always() && steps.gate.outputs.checks == 'true' && steps.stateapp.outputs.ok == 'true'
+      - if: always() && steps.stateapp.outputs.ok == 'true'
         id: statetoken
         continue-on-error: true
         uses: actions/create-github-app-token@v3
@@ -1314,7 +1425,7 @@ jobs:
       # token, or has no App secrets to make one fails this step red once
       # both reports are tried, so a re-run pushes it. There is no public
       # fallback.
-      - if: always() && steps.gate.outputs.checks == 'true'
+      - if: always()
         name: Keep the full reports in the private state repository
         id: kept
         env:
@@ -1395,7 +1506,7 @@ jobs:
       # broken: the JSON is missing, unparseable, or has no recommendation
       # read as one of those two. Broken fails closed: the arete-hold job
       # goes red saying so, and a re-run reads it again.
-      - if: always() && steps.gate.outputs.checks == 'true' && steps.arete.outputs.execution_file != ''
+      - if: always() && steps.arete.outputs.execution_file != ''
         name: Read arete-check's recommendation
         id: verdict
         run: |
@@ -1423,7 +1534,7 @@ jobs:
       # Seam: maxims-check gets no hold and no line comments yet; its
       # criteria for what is noteworthy are the owner's, still unset. When
       # they are, it gets a JSON like arete-check's and a branch here.
-      - if: always() && steps.gate.outputs.checks == 'true'
+      - if: always()
         name: Put each check's summary in the job summary and on the pull request
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1511,7 +1622,7 @@ jobs:
       # agent left is stripped. A comment already on the pull request with
       # the same path, line and text is not posted again. A line outside the
       # diff is refused by GitHub and warned about, never fatal.
-      - if: always() && steps.gate.outputs.checks == 'true' && steps.verdict.outputs.hold == 'true'
+      - if: always() && steps.verdict.outputs.hold == 'true'
         name: Put arete-check's line findings on their lines
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1544,40 +1655,13 @@ jobs:
                 || echo "::warning::could not comment on $where (not a line of the diff?)"
             done
 
-      # The content and head are recorded as reviewed only once the whole
-      # chain has landed: no step failed (a report that could not be pushed
-      # fails its step) and arete-check left a readable recommendation.
-      # Recorded earlier, a re-run of a red run would skip on the
-      # fingerprint and push nothing, read nothing.
-      - if: steps.gate.outputs.run == 'true' && steps.posted.outputs.posted == 'true' && steps.verdict.outputs.hold != 'broken'
-        name: Remember that this content was reviewed
-        run: echo "${{ steps.fp.outputs.id }}" > .claude-reviewed
-
-      - if: steps.gate.outputs.run == 'true' && steps.posted.outputs.posted == 'true' && steps.verdict.outputs.hold != 'broken'
-        uses: actions/cache/save@v6
-        with:
-          path: .claude-reviewed
-          key: claude-review-pr${{ github.event.pull_request.number }}-${{ steps.fp.outputs.id }}
-
-      - if: steps.gate.outputs.run == 'true' && steps.posted.outputs.posted == 'true' && steps.verdict.outputs.hold != 'broken'
-        name: Remember the head that was reviewed
-        run: echo "${{ github.event.pull_request.head.sha }}" > .claude-reviewed-head
-
-      - if: steps.gate.outputs.run == 'true' && steps.posted.outputs.posted == 'true' && steps.verdict.outputs.hold != 'broken'
-        uses: actions/cache/save@v6
-        with:
-          path: .claude-reviewed-head
-          key: claude-review-head-pr${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
-
       - if: always() && hashFiles('headless-run.jsonl') != ''
         uses: actions/upload-artifact@v7.0.2
         with:
-          name: headless-run
-          # The cost rows only. The checks' reports stay out: an artifact of
-          # a public repository is public, and the reports are kept in the
-          # private state repository instead.
+          name: headless-run-checks
+          # The cost rows only; the reports are kept privately above.
           path: headless-run.jsonl
-
+          overwrite: true
   # arete-check's "not yet" made visible: this job fails while the hold
   # stands, and Mergify's `merge` label rule wants no failing check, so the
   # pull request does not queue. No ruleset requires it, so the merge button
@@ -1596,9 +1680,9 @@ jobs:
   # here, saying its output was missing or broken (not "not yet"); no
   # review releases that, a re-run that reads one does.
   arete-hold:
-    needs: review
-    if: always() && needs.review.result != 'skipped'
-    name: "${{ needs.review.outputs.hold == 'true' && 'held: arete-check says not yet' || needs.review.outputs.hold == 'broken' && 'held: arete-check output missing or broken' || 'arete-check hold' }}"
+    needs: [triage, checks]
+    if: always() && needs.triage.result != 'skipped'
+    name: "${{ needs.checks.outputs.hold == 'true' && 'held: arete-check says not yet' || needs.checks.outputs.hold == 'broken' && 'held: arete-check output missing or broken' || 'arete-check hold' }}"
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions:
@@ -1610,7 +1694,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           MARKER: '<!-- claude-review-check:arete-check -->'
           HOLD_MARKER: '<!-- claude-review-hold:arete-check -->'
-          READING: ${{ needs.review.outputs.hold }}
+          READING: ${{ needs.checks.outputs.hold }}
         run: |
           if [ "$READING" = broken ]; then
             echo "::error::arete-check's output was missing or broken this run (arete.json absent, unparseable or without a readable recommendation). This is not a not yet. Re-run the failed jobs to read it again."
@@ -1665,12 +1749,12 @@ jobs:
   # or fails the gate, goes back to the author in one signed comment with the
   # branch as it was. The merge is pushed as the App, signed, before the easy
   # fixes, which then land on the merged tree. That part runs behind any
-  # review job that finished, posted or not; the fixes still need a review
-  # this run posted. A conflict that appears later, when the base moves, waits
-  # for the next pull_request event.
+  # triage that passed, whether the review then ran, posted or was skipped;
+  # the fixes still need a review this run posted. A conflict that appears
+  # later, when the base moves, waits for the next pull_request event.
   fixer:
-    needs: review
-    if: needs.review.result == 'success'
+    needs: [triage, review]
+    if: always() && needs.triage.result == 'success' && (needs.review.result == 'success' || needs.review.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 15  # stand-in until three runs are measured
     concurrency:
@@ -2315,30 +2399,69 @@ jobs:
           pr: ${{ github.event.pull_request.number }}
           fields: '{"head_sha":"${{ github.event.pull_request.head.sha }}"}'
 
-      # One `headless-run` artifact per run is what metrics-db collects, and
-      # the review job already uploaded it: fetch it, add this row, replace it.
-      # A failed download stops here: uploading the fixer's row alone would
-      # replace the review's rows.
       - if: always() && hashFiles('headless-run.jsonl') != ''
-        id: download
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: headless-run-fixer
+          # The record job joins it into the run's headless-run artifact.
+          path: headless-run.jsonl
+          overwrite: true
+
+  # What waits for every other job: the run's one `headless-run` artifact and
+  # the fingerprint. metrics-db collects the artifact by that one name, and
+  # two jobs cannot upload one name, so each job uploads its own rows as
+  # headless-run-<job> and this job joins them.
+  record:
+    needs: [triage, review, checks, fixer]
+    if: always() && needs.triage.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Fetch each job's cost rows
+        id: rows
         continue-on-error: true
         uses: actions/download-artifact@v8.0.2
         with:
-          name: headless-run
-          path: ${{ runner.temp }}/review-artifact
+          pattern: headless-run-*
+          path: ${{ runner.temp }}/rows
 
-      - if: always() && steps.download.outcome == 'success'
-        name: Merge the fixer's row into the run's headless-run artifact
-        env:
-          PREV: ${{ runner.temp }}/review-artifact
+      - if: steps.rows.outcome == 'success'
+        name: Join them into the run's headless-run artifact
         run: |
-          mkdir -p "$PREV"
-          cat headless-run.jsonl >> "$PREV/headless-run.jsonl"
+          shopt -s nullglob
+          files=("$RUNNER_TEMP"/rows/*/headless-run.jsonl)
+          if [ ${#files[@]} -gt 0 ]; then cat "${files[@]}" > headless-run.jsonl; else echo "no cost rows to join"; fi
 
-      - if: always() && steps.download.outcome == 'success'
+      - if: hashFiles('headless-run.jsonl') != ''
         uses: actions/upload-artifact@v7.0.2
         with:
           name: headless-run
-          path: ${{ runner.temp }}/review-artifact
-          include-hidden-files: true
+          path: headless-run.jsonl
           overwrite: true
+
+      # The content and head are recorded as reviewed only once the whole
+      # chain has landed: the review posted, the checks job did not fail (a
+      # report that could not be pushed fails its step) and arete-check left
+      # a readable recommendation. A failed artifact upload above does not
+      # stop it. Recorded earlier, a re-run of a red run would skip on the
+      # fingerprint and push nothing, read nothing.
+      - if: "!cancelled() && needs.review.result == 'success' && needs.review.outputs.posted == 'true' && (needs.checks.result == 'success' || needs.checks.result == 'skipped') && needs.checks.outputs.hold != 'broken'"
+        name: Remember that this content was reviewed
+        run: echo "${{ needs.triage.outputs.fp }}" > .claude-reviewed
+
+      - if: "!cancelled() && needs.review.result == 'success' && needs.review.outputs.posted == 'true' && (needs.checks.result == 'success' || needs.checks.result == 'skipped') && needs.checks.outputs.hold != 'broken'"
+        uses: actions/cache/save@v6
+        with:
+          path: .claude-reviewed
+          key: claude-review-pr${{ github.event.pull_request.number }}-${{ needs.triage.outputs.fp }}
+
+      - if: "!cancelled() && needs.review.result == 'success' && needs.review.outputs.posted == 'true' && (needs.checks.result == 'success' || needs.checks.result == 'skipped') && needs.checks.outputs.hold != 'broken'"
+        name: Remember the head that was reviewed
+        run: echo "${{ github.event.pull_request.head.sha }}" > .claude-reviewed-head
+
+      - if: "!cancelled() && needs.review.result == 'success' && needs.review.outputs.posted == 'true' && (needs.checks.result == 'success' || needs.checks.result == 'skipped') && needs.checks.outputs.hold != 'broken'"
+        uses: actions/cache/save@v6
+        with:
+          path: .claude-reviewed-head
+          key: claude-review-head-pr${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
