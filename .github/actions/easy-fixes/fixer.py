@@ -18,6 +18,16 @@ where the tests reach it.
   report  the commit's sha (or why there is none) -> one reply per thread and
           the roll-up for the job summary
 
+When the branch conflicts with its base, the job merges the base in first and
+these decide whether a small model may resolve what git left:
+
+  conflicts  after `git merge`: the conflicted files, or the rule that sends
+             the conflict to the author instead (see conflict_problem)
+  resolved   after the model: whether every conflict is gone and nothing else
+             changed, and the model's note per file
+  merge-tree the merged commit as the Git Data API's tree entries
+  merge-comment  the one signed PR comment on how the conflict went
+
 No path is off limits by its name: a hook, a workflow or a config file is
 fixed like any other. A path is refused only when it is unsafe to edit (see
 path_problem). A push touching .github/workflows/ needs the agent App to hold
@@ -182,7 +192,9 @@ def by_fixer(message):
     return any(ln.strip().startswith(TRAILER) for ln in (message or "").splitlines())
 
 
-def plan(nodes, head, root, head_message=""):
+def plan(nodes, head, root, head_message="", moved=()):
+    """`moved` is the paths a merge with the base changed in the checkout
+    before the plan: the review's line numbers on them may no longer hold."""
     if by_fixer(head_message):
         return []
     threads = easy_threads(nodes, head)
@@ -193,6 +205,8 @@ def plan(nodes, head, root, head_message=""):
         problem = path_problem(root, path) if path else None
         if problem:
             t.update(status="not-taken", why=problem)
+        elif path in moved:
+            t.update(status="not-taken", why="the merge with the base changed this file, so the review's lines may not hold")
         elif not fences:
             t.update(status="agent")
         elif len(fences) > 1:
@@ -334,6 +348,207 @@ def report(threads, sha, failure, sign, note=""):
     return {"replies": replies, "summary": "\n".join(md) + "\n", "counts": counts}
 
 
+# The conflict path. A conflict goes to the model only when it is small and
+# plain text; every rule below sends it to the author instead, with the branch
+# left as it was.
+MAX_CONFLICTS = 5
+LOCKFILES = {"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+             "poetry.lock", "Pipfile.lock", "uv.lock", "Cargo.lock", "Gemfile.lock",
+             "composer.lock", "flake.lock"}
+GENERATED = re.compile(r"(?:^|/)(?:vendor|vendored|third_party|node_modules|dist|generated)/"
+                       r"|\.min\.(?:js|css)$|\.pb\.go$|_pb2\.py$|\.snap$")
+# `=======` is left out: it is also a Markdown heading underline.
+MARKER = re.compile(rb"^(?:<{7}|>{7}|\|{7})(?: |\r?$)", re.M)
+NOTE_MAX = 200
+# claude-code-action checks these out from the base and resets them in the
+# index before the model starts (its restore-config), so a conflict in one
+# would reach the model already overwritten.
+ACTION_RESETS = (".claude", ".mcp.json", ".claude.json", ".gitmodules", ".ripgreprc",
+                 "CLAUDE.md", "CLAUDE.local.md", ".husky")
+
+
+def unmerged(root):
+    """git's unmerged index entries: {path: {stage: (mode, sha)}}."""
+    out = git(root, "-c", "core.quotepath=off", "ls-files", "-u", "-z").decode("utf-8")
+    entries = {}
+    for rec in filter(None, out.split("\0")):
+        meta, path = rec.split("\t", 1)
+        mode, sha, stage = meta.split()
+        entries.setdefault(path, {})[int(stage)] = (mode, sha)
+    return entries
+
+
+def attrs(root, paths):
+    """{path: {attr: value}} for the attributes that bear on a merge."""
+    if not paths:
+        return {}
+    out = git(root, "check-attr", "-z", "binary", "merge", "linguist-generated",
+              "linguist-vendored", "--", *paths).decode("utf-8").split("\0")
+    res = {}
+    for i in range(0, len(out) - 2, 3):
+        res.setdefault(out[i], {})[out[i + 1]] = out[i + 2]
+    return res
+
+
+def conflict_problem(root, path, stages, attr):
+    """Why this conflicted file goes to the author, not the model, or None."""
+    problem = path_problem(root, path)
+    if problem:
+        return problem
+    if any(path == p or path.startswith(p + "/") for p in ACTION_RESETS):
+        return "a path claude-code-action resets from the base before the model runs"
+    if 2 not in stages or 3 not in stages:
+        return "one side deleted or renamed it"
+    if any(mode in ("120000", "160000") for mode, _ in stages.values()):
+        return "a symlink or submodule conflict"
+    name = path.rsplit("/", 1)[-1]
+    if name in LOCKFILES or name.endswith(".sum"):
+        return "a lockfile, regenerated rather than merged"
+    if GENERATED.search(path) or attr.get("linguist-generated") in ("set", "true") \
+            or attr.get("linguist-vendored") in ("set", "true"):
+        return "a vendored or generated file"
+    if attr.get("binary") == "set" or attr.get("merge") in ("unset", "binary"):
+        return "a binary file"
+    for _, sha in stages.values():
+        blob = git(root, "cat-file", "blob", sha)
+        if b"\0" in blob[:8000]:
+            return "a binary file"
+        if MARKER.search(blob):
+            return "it has conflict-marker lines of its own, so a leftover could not be told"
+    try:
+        text = (Path(root) / path).read_bytes()
+    except OSError:
+        return "git left no file to resolve"
+    if not MARKER.search(text):
+        return "git left no conflict markers in it"
+    return None
+
+
+def conflicts(root, max_files=MAX_CONFLICTS):
+    """After `git merge --no-commit`: the conflicted files, and whether the
+    model may resolve them (`resolve`), git merged cleanly (`clean`), or a rule
+    sends them to the author (`escalate`, with the rule and each file's why)."""
+    entries = unmerged(root)
+    files = sorted(entries)
+    if not files:
+        return {"status": "clean", "files": []}
+    if len(files) > max_files:
+        return {"status": "escalate", "files": files,
+                "rule": f"more than {max_files} conflicted files ({len(files)})", "problems": {}}
+    at = attrs(root, [f for f in files if SAFE_PATH.match(f)])
+    problems = {}
+    for f in files:
+        why = conflict_problem(root, f, entries[f], at.get(f, {}))
+        if why:
+            problems[f] = why
+    if problems:
+        return {"status": "escalate", "files": files, "problems": problems,
+                "rule": "a conflicted file the fixer leaves to the author"}
+    hunks = {f: len(re.findall(rb"^<{7}(?: |\r?$)", (Path(root) / f).read_bytes(), re.M))
+             for f in files}
+    return {"status": "resolve", "files": files, "hunks": hunks}
+
+
+def notes(answers, files):
+    """The model's one line per file, as plain text a comment can carry."""
+    out = {}
+    for ln in (answers or "").splitlines():
+        path, sep, text = ln.partition(":")
+        path = path.strip().strip("`")
+        if sep and path in files and path not in out:
+            text = re.sub(r"[\x00-\x1f\x7f]", " ", text).strip().replace("@", "@\u200b")
+            text = text.replace("|", "\\|")
+            out[path] = text[:NOTE_MAX] or "no note"
+    return {f: out.get(f, "no note from the model") for f in files}
+
+
+def resolved(root, files, answers=""):
+    """After the model: every conflicted file still there, free of markers and
+    safe to commit. Any other tracked file changed in the worktree goes back
+    to the merge's version in the index, as the gate reverts what no thread
+    names: the model can edit only the conflicted files, so such a change is
+    the action's own (its restore-config) or nobody's to make."""
+    problems = {}
+    for f in files:
+        why = path_problem(root, f)
+        if not why:
+            try:
+                if MARKER.search((Path(root) / f).read_bytes()):
+                    why = "the model left conflict markers in it"
+            except OSError:
+                why = "the model deleted it"
+        if why:
+            problems[f] = why
+    out = git(root, "-c", "core.quotepath=off", "diff", "--name-only", "-z").decode("utf-8")
+    reverted = sorted(set(filter(None, out.split("\0"))) - set(files))
+    for p in reverted:
+        git(root, "-c", "core.hooksPath=/dev/null", "checkout", "--", p)
+    if problems:
+        rule = ("the model left a conflict unresolved"
+                if any("markers" in w for w in problems.values())
+                else "the resolved tree failed the fixer's gate")
+        return {"ok": False, "files": files, "rule": rule, "problems": problems, "reverted": reverted}
+    return {"ok": True, "files": files, "notes": notes(answers, files), "reverted": reverted}
+
+
+def merge_tree(root, base, head):
+    """The local merge commit (HEAD) as Git Data API input: tree entries on
+    top of the base's tree for every path the merge's tree differs from it,
+    and the blobs neither parent holds, which must be uploaded first."""
+    out = git(root, "-c", "core.quotepath=off", "diff", "--no-renames", "--raw", "--full-index", "--no-abbrev", "-z",
+              base, "HEAD").decode("utf-8").split("\0")
+    entries, upload = [], []
+    paths = []
+    for i in range(0, len(out) - 1, 2):
+        if not out[i].startswith(":"):
+            break
+        old_mode, new_mode, _, sha, status = out[i][1:].split()
+        path = out[i + 1]
+        paths.append(path)
+        if status == "D":
+            entries.append({"path": path, "mode": old_mode,
+                            "type": "commit" if old_mode == "160000" else "blob", "sha": None})
+        else:
+            entries.append({"path": path, "mode": new_mode,
+                            "type": "commit" if new_mode == "160000" else "blob", "sha": sha})
+    in_head = {}
+    if paths:
+        ls = git(root, "-c", "core.quotepath=off", "ls-tree", "-z", head, "--", *paths).decode("utf-8")
+        for rec in filter(None, ls.split("\0")):
+            meta, path = rec.split("\t", 1)
+            in_head[path] = meta.split()[2]
+    upload = [e["path"] for e in entries
+              if e["sha"] and e["type"] == "blob" and in_head.get(e["path"]) != e["sha"]]
+    return {"base_tree": git(root, "rev-parse", f"{base}^{{tree}}").decode().strip(),
+            "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(),
+            "entries": entries, "upload": upload}
+
+
+def merge_comment(state, base, sign, marker, sha="", failure=""):
+    """The one PR comment on the conflict: resolved and pushed, resolved but
+    not pushed, or left to the author with the rule that stopped it."""
+    files = state.get("files") or []
+    if state.get("ok") and sha:
+        lines = [f"🤖 The fixer merged `{base}` into this branch in {sha} and resolved "
+                 f"the conflicts in {len(files)} file(s):", "", "| file | how |", "|---|---|"]
+        lines += [f"| `{f}` | {n} |" for f, n in (state.get("notes") or {}).items()]
+        lines += ["", "The merge runs CI and the review like any other push."]
+    else:
+        if state.get("ok"):
+            head = (f"🤖 The fixer resolved the conflicts with `{base}` but could not push "
+                    f"the merge: {failure or 'no commit'}.")
+            rows = [(f, n) for f, n in (state.get("notes") or {}).items()]
+        else:
+            head = (f"🤖 The fixer did not resolve this branch's conflicts with `{base}`: "
+                    f"{state.get('rule') or 'the fixer stopped before checking a resolution'}.")
+            probs = state.get("problems") or {}
+            rows = [(f, probs.get(f, "conflicted")) for f in files]
+            rows += [(f, w) for f, w in probs.items() if f not in files]
+        lines = [head, "", "| file | why |", "|---|---|"] + [f"| `{f}` | {w} |" for f, w in rows]
+        lines += ["", "The branch is as it was; the conflicts are the author's to resolve."]
+    return "\n".join(lines + ["", marker, sign]) + "\n"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -342,6 +557,7 @@ def main(argv=None):
     p.add_argument("--head", required=True)
     p.add_argument("--root", default=".")
     p.add_argument("--head-message", default="", help="file holding the head commit's message")
+    p.add_argument("--moved", help="file of paths (one per line) a merge with the base changed")
     p.add_argument("--out", required=True)
     g = sub.add_parser("gate")
     g.add_argument("--plan", required=True)
@@ -356,11 +572,51 @@ def main(argv=None):
     r.add_argument("--note", default="")
     r.add_argument("--sign", required=True)
     r.add_argument("--out", required=True)
+    c = sub.add_parser("conflicts")
+    c.add_argument("--root", default=".")
+    c.add_argument("--max-files", type=int, default=MAX_CONFLICTS)
+    c.add_argument("--out", required=True)
+    v = sub.add_parser("resolved")
+    v.add_argument("--conflicts", required=True)
+    v.add_argument("--answers", default="")
+    v.add_argument("--root", default=".")
+    v.add_argument("--out", required=True)
+    t = sub.add_parser("merge-tree")
+    t.add_argument("--base", required=True)
+    t.add_argument("--head", required=True)
+    t.add_argument("--root", default=".")
+    t.add_argument("--out", required=True)
+    m = sub.add_parser("merge-comment")
+    m.add_argument("--state", required=True, help="conflicts.json or resolved.json")
+    m.add_argument("--base", required=True)
+    m.add_argument("--sign", required=True)
+    m.add_argument("--marker", required=True)
+    m.add_argument("--sha", default="")
+    m.add_argument("--failure", default="")
+    m.add_argument("--out", required=True)
     a = ap.parse_args(argv)
-    if a.cmd == "plan":
+    if a.cmd == "conflicts":
+        res = conflicts(a.root, a.max_files)
+    elif a.cmd == "resolved":
+        try:
+            answers = Path(a.answers).read_text(errors="replace") if a.answers else ""
+        except OSError:
+            answers = ""
+        res = resolved(a.root, json.loads(Path(a.conflicts).read_text())["files"], answers)
+    elif a.cmd == "merge-tree":
+        res = merge_tree(a.root, a.base, a.head)
+    elif a.cmd == "merge-comment":
+        Path(a.out).write_text(merge_comment(json.loads(Path(a.state).read_text()), a.base,
+                                             a.sign, a.marker, a.sha, a.failure))
+        return 0
+    elif a.cmd == "plan":
         nodes = json.loads(Path(a.threads).read_text())
         msg = Path(a.head_message).read_text() if a.head_message else ""
-        res = plan(nodes, a.head, a.root, msg)
+        try:
+            moved = set(Path(a.moved).read_text().splitlines()) if a.moved else set()
+        except OSError:
+            moved = set()
+        res = plan(nodes, a.head, a.root, msg, moved)
     elif a.cmd == "gate":
         try:
             agent = json.loads(Path(a.agent).read_text())
