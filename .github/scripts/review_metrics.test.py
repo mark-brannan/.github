@@ -90,6 +90,30 @@ class ParseLog(unittest.TestCase):
 }'''))
         self.assertEqual((f["model"], f["cost"], f["turns"], f["effort"]), ("claude-opus-5-5", 0.2222, 7, "high"))
 
+    def test_the_review_is_the_invocation_that_tracks_progress_wherever_it_runs(self):
+        def run(model, effort, cost, track):
+            return '''##[group]Run anthropics/claude-code-action@d535f51
+with:
+  track_progress: %s
+  claude_args: --model "%s"%s
+##[endgroup]
+{
+  "type": "system",
+  "subtype": "init",
+  "model": "%s"
+}
+{
+  "type": "result",
+  "subtype": "success",
+  "total_cost_usd": %s
+}''' % (track, model, effort and " --effort " + effort, model, cost)
+        triage = "##[notice]review triage: deep (2 risky path(s): anything under .github/)\n"
+        review = run("claude-opus-5-5", "high", 0.9, "true")
+        checks = [run("claude-sonnet-5-5", "medium", 0.35, "false"), run("claude-haiku-5-5", "", 0.05, "false")]
+        for log in (stamped(triage + "\n".join(checks + [review])), stamped(triage + "\n".join([review] + checks))):
+            f = rm.parse_log(log)
+            self.assertEqual((f["model"], f["cost"], f["effort"], f["tier"]), ("claude-opus-5-5", 0.9, "high", "deep"))
+
     def test_default_tier_review_takes_no_effort_from_a_later_check(self):
         f = rm.parse_log(stamped('''  claude_args: --model "claude-sonnet-5-5"
 {
