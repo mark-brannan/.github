@@ -183,6 +183,10 @@ with:
         self.assertIsNone(f["cost"])
         self.assertEqual((f["tier"], f["why"]), ("skip", "Dependabot pull request"))
 
+    def test_governing_tier_is_read(self):
+        f = rm.parse_log(stamped("##[notice]review triage: governing (substantive=true trivial=false in CLAUDE.md)\n"))
+        self.assertEqual((f["tier"], f["why"]), ("governing", "substantive=true trivial=false in CLAUDE.md"))
+
     def test_pre_triage_log_has_no_tier(self):
         f = rm.parse_log(stamped('{\n  "type": "result",\n  "total_cost_usd": 0.1\n}'))
         self.assertEqual((f["tier"], f["cost"], f["paths"]), ("", 0.1, ""))

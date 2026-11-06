@@ -85,7 +85,7 @@ WORKERS = 2  # log downloads in flight; GitHub's secondary rate limit trips on m
 CAP = 1000  # GitHub lists at most this many runs for a filtered query (#73)
 FLOOR = 2000  # calls --pace leaves in the hourly budget for every other session
 STAMP = re.compile(r"^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ?")
-TRIAGE = re.compile(r"^##\[notice\]review triage: (skip|default|deep) \((.*)\)\s*$")
+TRIAGE = re.compile(r"^##\[notice\]review triage: (skip|default|deep|governing) \((.*)\)\s*$")
 ARGS = re.compile(r"^\s+claude_args: ")
 EFFORT = re.compile(r"--effort\s+([a-z]+)")
 CLASSES = re.compile(r"^\s+CLASSES: ((?:[a-z]+=\d+ ?)+)$")
