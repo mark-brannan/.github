@@ -261,6 +261,19 @@ class Gate(unittest.TestCase):
         self.assertEqual(res["additions"], [])
 
 
+class Workflow(unittest.TestCase):
+    def test_the_gate_runs_once_before_the_update(self):
+        # gate() rewrites the tree it reads, so a second run reads a different
+        # one: the update step runs it, the commit step only when that did not.
+        wf = (HERE.parents[1] / "workflows" / "claude-review.yml").read_text()
+        update = wf.index("Gate the fixes and update the branch")
+        commit = wf.index("name: Commit the fixes")
+        self.assertEqual(wf.count('"$SCRIPT" gate'), 2)
+        self.assertLess(update, wf.index('"$SCRIPT" gate'))
+        self.assertLess(wf.index('"$SCRIPT" gate'), wf.index("/update-branch"))
+        self.assertIn('[ -f "$FIXER_DIR/gate.json" ] || python3 "$SCRIPT" gate', wf[commit:])
+
+
 class Report(unittest.TestCase):
     def test_every_thread_gets_one_reply_and_no_commit_means_left(self):
         r = Repo({"a.txt": "1\n", ".github/x.yml": "1\n"})

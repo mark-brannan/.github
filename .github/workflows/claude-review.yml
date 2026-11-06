@@ -1812,14 +1812,15 @@ jobs:
       # Merely behind: bring it up to date before the fix commit, a signed
       # merge by the same App, so the fix is the last push and nothing lands
       # after it to cancel its checks. A conflict is not resolved here; it goes
-      # in the replies. Only when the gate would commit something: a merge with
-      # no fix behind it would only start another review. The API answers 202
-      # and merges later, so wait for the head to move; the paths the merge
-      # changed (both sides of a rename) are listed in moved.txt, and the commit
-      # step leaves those files alone. When that cannot be told, `skip` says why
-      # and nothing is committed.
+      # in the replies. The gate runs once, here, with the paths the update will
+      # bring in (the base's changes since the merge-base, both sides of a
+      # rename) already in moved.txt, and the update happens only when the gate
+      # would commit something: a merge with no fix behind it would only start
+      # another review. The commit step reads this gate.json. The API answers
+      # 202 and merges later, so wait for the head to move. When the changed
+      # paths cannot be told, `skip` says why and nothing is committed.
       - if: "!cancelled() && steps.plan.outcome == 'success' && steps.plan.outputs.threads > 0"
-        name: Update the branch if it is behind
+        name: Gate the fixes and update the branch if it is behind
         id: update
         env:
           SCRIPT: ${{ steps.tools.outputs.script }}
@@ -1831,22 +1832,40 @@ jobs:
           : > "$FIXER_DIR/moved.txt"
           if ! printf '%s  %s\n%s  %s\n' "$SCRIPT_SHA" "$SCRIPT" "$PLAN_SHA" "$FIXER_DIR/plan.json" | sha256sum -c --quiet; then
             echo "skip=the fixer script or plan changed after the plan step" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "::error::fixer.py or plan.json changed after the plan step; nothing committed"
+            exit 1
           fi
-          # Would the gate commit anything? It is idempotent: the commit step runs it again.
-          python3 "$SCRIPT" gate --plan "$FIXER_DIR/plan.json" --agent "$FIXER_DIR/agent.json" --root . \
-            --out "$FIXER_DIR/gate-pre.json" || true
-          [ "$(jq '.additions | length' "$FIXER_DIR/gate-pre.json" 2>/dev/null || echo 0)" -gt 0 ] || exit 0
           for _ in 1 2 3 4 5; do
             mergeable=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.mergeable') || mergeable=null
             [ "$mergeable" != null ] && break
             sleep 3
           done
           base=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.base.ref')
-          behind=$(gh api "repos/$GITHUB_REPOSITORY/compare/$base...$HEAD_SHA" --jq '.behind_by') || behind=unknown
+          # What the update would bring in: the base's changes since the merge-base.
+          behind=0
+          if [ "$mergeable" != false ] && cmp=$(gh api "repos/$GITHUB_REPOSITORY/compare/$HEAD_SHA...$base"); then
+            behind=$(jq '.ahead_by' <<<"$cmp")
+            if [ "$behind" -gt 0 ]; then
+              # The compare endpoint lists at most 300 files: a full page is unknown.
+              if [ "$(jq '.files | length' <<<"$cmp")" -lt 300 ]; then
+                jq -r '.files[] | .filename, (.previous_filename // empty)' <<<"$cmp" > "$FIXER_DIR/moved.txt"
+              else
+                echo "::warning::could not list what the update would change; nothing committed"
+                echo "skip=could not tell what the branch update would change, so no fix was committed" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+          elif [ "$mergeable" != false ]; then
+            behind=unknown
+          fi
+          python3 "$SCRIPT" gate --plan "$FIXER_DIR/plan.json" --agent "$FIXER_DIR/agent.json" --root . \
+            --moved "$FIXER_DIR/moved.txt" --out "$FIXER_DIR/gate.json" || true
           if [ "$mergeable" = false ]; then
             echo "note=The branch conflicts with $base; the fixer did not update it." >> "$GITHUB_OUTPUT"
-          elif [ "$behind" != unknown ] && [ "$behind" -gt 0 ]; then
+            exit 0
+          fi
+          [ "$(jq '.additions | length' "$FIXER_DIR/gate.json" 2>/dev/null || echo 0)" -gt 0 ] || exit 0
+          if [ "$behind" != unknown ] && [ "$behind" -gt 0 ]; then
             if gh api -X PUT "repos/$GITHUB_REPOSITORY/pulls/$PR/update-branch" -f expected_head_sha="$HEAD_SHA" >/dev/null; then
               new=$HEAD_SHA
               for _ in $(seq 1 15); do
@@ -1857,16 +1876,9 @@ jobs:
               if [ "$new" = "$HEAD_SHA" ]; then
                 echo "::warning::update-branch did not land in time; nothing committed"
                 echo "skip=the branch update was accepted but had not landed yet, so no fix was committed" >> "$GITHUB_OUTPUT"
-              elif files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$HEAD_SHA...$new" \
-                     --jq '.files[] | .filename, (.previous_filename // empty)') \
-                   && [ "$(printf '%s\n' "$files" | grep -c .)" -lt 300 ]; then
-                printf '%s\n' "$files" > "$FIXER_DIR/moved.txt"
+              else
                 echo "head=$new" >> "$GITHUB_OUTPUT"
                 echo "note=Branch brought up to date with $base before the fix." >> "$GITHUB_OUTPUT"
-              else
-                # The compare endpoint lists at most 300 files: a full page is unknown.
-                echo "::warning::could not list what the merge changed; nothing committed"
-                echo "skip=could not tell what the branch update changed, so no fix was committed" >> "$GITHUB_OUTPUT"
               fi
             else
               echo "::warning::update-branch failed; the branch stays behind $base"
@@ -1877,7 +1889,7 @@ jobs:
       # suggestion fixes; an agent thread with no answer is `left`.
       # The check on what is actually in the tree: every change a taken thread
       # does not name, or that the base branch changed in the update step, is
-      # reverted here and never reaches the commit. createCommitOnBranch makes
+      # reverted by the gate and never reaches the commit. createCommitOnBranch makes
       # one signed commit on the head the update step left (expectedHeadOid), so
       # a push in between fails the commit rather than overwriting it.
       - if: "!cancelled() && steps.plan.outcome == 'success' && steps.plan.outputs.threads > 0"
@@ -1903,7 +1915,9 @@ jobs:
             echo "::error::fixer.py or plan.json changed after the plan step; nothing committed"
             exit 1
           fi
-          python3 "$SCRIPT" gate \
+          # The update step already ran the gate; a second run would read a tree
+          # the first one changed. Run it here only when that step did not get there.
+          [ -f "$FIXER_DIR/gate.json" ] || python3 "$SCRIPT" gate \
             --plan "$FIXER_DIR/plan.json" --agent "$FIXER_DIR/agent.json" --root . \
             --moved "$FIXER_DIR/moved.txt" --out "$FIXER_DIR/gate.json"
           jq -r '.reverted[] | "::notice::reverted \(.path): \(.why)"' "$FIXER_DIR/gate.json"
