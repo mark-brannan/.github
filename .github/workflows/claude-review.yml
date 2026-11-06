@@ -1783,7 +1783,8 @@ jobs:
           echo "base-sha=$base_sha" >> "$GITHUB_OUTPUT"
           rc=0
           "${G[@]}" merge --no-ff --no-commit "$base_sha" > "$FIXER_DIR/merge.log" 2>&1 || rc=$?
-          python3 "$SCRIPT" conflicts --root . --out "$FIXER_DIR/conflicts.json"
+          python3 "$SCRIPT" conflicts --root . --out "$FIXER_DIR/conflicts.json" \
+            || jq -n '{status: "escalate", files: [], problems: {}, rule: "the fixer could not sort the conflicts"}' > "$FIXER_DIR/conflicts.json"
           status=$(jq -r .status "$FIXER_DIR/conflicts.json")
           if [ "$status" = clean ]; then
             status=none
@@ -1887,6 +1888,7 @@ jobs:
           SCRIPT: ${{ steps.tools.outputs.script }}
           SCRIPT_SHA: ${{ steps.merge.outputs.script-sha }}
           CONFLICTS_SHA: ${{ steps.merge.outputs.conflicts-sha }}
+          AGENT: ${{ steps.conflict-agent.outcome }}
         run: |
           set -uo pipefail
           G=(git -c core.hooksPath=/dev/null -c user.name=claude-fixer
@@ -1897,6 +1899,13 @@ jobs:
             exit 1
           fi
           cp "$FIXER_DIR/index.pre" .git/index
+          if [ "$AGENT" = skipped ]; then
+            jq '{ok: false, files: .files, problems: {}, rule: "the conflict agent did not run"}' \
+              "$FIXER_DIR/conflicts.json" > "$FIXER_DIR/resolved.json"
+            "${G[@]}" merge --abort 2>/dev/null || "${G[@]}" reset -q --hard "$HEAD_SHA"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           python3 "$SCRIPT" resolved --conflicts "$FIXER_DIR/conflicts.json" \
             --answers "$FIXER_DIR/conflict-answers.txt" --root . --out "$FIXER_DIR/resolved.json" \
             || jq -n '{ok: false, files: [], problems: {}, rule: "the fixer could not check the resolution"}' > "$FIXER_DIR/resolved.json"
