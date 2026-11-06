@@ -975,7 +975,7 @@ jobs:
       # two are independent readings of the same diff.
       - if: "!cancelled() && steps.gate.outputs.checks == 'true'"
         id: maxims
-        timeout-minutes: 10
+        timeout-minutes: 5
         uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         # Strip the Anthropic and cloud credentials from every shell the
         # agent starts, so no Bash call finds the OAuth token in the shell's
