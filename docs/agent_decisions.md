@@ -95,3 +95,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261104t221102z
 - Keep three renderers of the Try it line (check, portolani generator, Stop hook) rather than one fetched generator: the Stop hook stays offline Undo: add --line mode and have the siblings run it ([#114](https://github.com/mark-brannan/.github/pull/114#discussion_r4472416121)) ([#114](https://github.com/mark-brannan/.github/pull/114))
+
+### 20261106t210701z
+- the family switch's direction follows the tier: deep never below Opus (Opus-authored to Fable), default sideways or down (Sonnet-authored to Haiku) Undo: one line in the family switch ([#416](https://github.com/mark-brannan/claude/pull/416))
