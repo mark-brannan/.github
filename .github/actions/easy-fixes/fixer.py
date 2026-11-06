@@ -5,11 +5,12 @@ that decides which thread is taken and which path may be committed lives here,
 where the tests reach it.
 
   plan    the review threads (GraphQL nodes) -> this head's open [easy] threads,
-          risky paths refused, suggestion fences applied to the checkout and
+          suggestion fences applied to the checkout and
           the agent's line numbers moved past them; nothing on a head the
           fixer itself committed
-  gate    after the agent: every changed tracked path not risky and named by a
-          taken thread is kept, every other one reverted; a file the agent
+  gate    after the agent: every changed tracked path named by a
+          taken thread is kept (unless the base branch changed it since the
+          review), every other one reverted; a file the agent
           edited while leaving one of its threads unfinished goes back to how
           the agent found it, suggestion fixes and all; the kept
           files become
@@ -17,13 +18,14 @@ where the tests reach it.
   report  the commit's sha (or why there is none) -> one reply per thread and
           the roll-up for the job summary
 
-The risky class is `RISKY` in the environment: shell globs, whitespace
-separated, matched against the path from the repo root like a `case` pattern
-(so `*` crosses `/`), the same list the triage step's risky_path() reads.
+No path is off limits by its name: a hook, a workflow or a config file is
+fixed like any other. A path is refused only when it is unsafe to edit (see
+path_problem). A push touching .github/workflows/ needs the agent App to hold
+the `workflows` permission; without it GitHub rejects the commit and the
+roll-up says so.
 """
 import argparse
 import base64
-import fnmatch
 import hashlib
 import json
 import os
@@ -40,14 +42,6 @@ BOT_LOGINS = {"claude", "claude[bot]"}
 TRAILER = "Claude-Fixer-Run:"
 
 
-def risky_globs():
-    return os.environ.get("RISKY", "").split()
-
-
-def is_risky(path, globs):
-    return any(fnmatch.fnmatchcase(path, g) for g in globs)
-
-
 # A thread's path reaches the agent's --allowedTools, so only plain path
 # characters pass: a `,`, `(`, `)` or space could forge a tool grant.
 SAFE_PATH = re.compile(r"^[A-Za-z0-9._/-]+$")
@@ -55,8 +49,8 @@ SAFE_PATH = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 def path_problem(root, path):
     """Why the fixer will not touch this path, or None. Checked before any
-    edit and again at commit: a symlink could carry an edit past the risky
-    class to wherever it points."""
+    edit and again at commit: a symlink could carry an edit to wherever it
+    points."""
     if not SAFE_PATH.match(path) or path.startswith("/") or ".." in path.split("/"):
         return "its path has characters the fixer does not pass on"
     parts = path.split("/")
@@ -188,7 +182,7 @@ def by_fixer(message):
     return any(ln.strip().startswith(TRAILER) for ln in (message or "").splitlines())
 
 
-def plan(nodes, head, root, globs, head_message=""):
+def plan(nodes, head, root, head_message=""):
     if by_fixer(head_message):
         return []
     threads = easy_threads(nodes, head)
@@ -199,8 +193,6 @@ def plan(nodes, head, root, globs, head_message=""):
         problem = path_problem(root, path) if path else None
         if problem:
             t.update(status="not-taken", why=problem)
-        elif path and is_risky(path, globs):
-            t.update(status="not-taken", why=f"{path} is a risky path; the fixer never edits one")
         elif not fences:
             t.update(status="agent")
         elif len(fences) > 1:
@@ -246,9 +238,13 @@ def changed_tracked(root):
     return pairs
 
 
-def gate(threads, agent, root, globs):
-    """Keep only changes a taken thread names, off the risky class; revert the
-    rest. Returns the threads with final statuses and the files to commit."""
+def gate(threads, agent, root, moved=()):
+    """Keep only changes a taken thread names; revert the
+    rest. `moved` is the paths the base branch changed since the head the
+    threads were read from: the commit lands on the updated head and carries
+    whole files, so a kept file the base also changed would undo the base's
+    change; it is reverted instead. Returns the threads with final statuses
+    and the files to commit."""
     answers = {a.get("thread_id"): a for a in agent if isinstance(a, dict)}
     agent_threads = [t for t in threads if t.get("status") == "agent"]
     unfinished = {t["path"] for t in agent_threads
@@ -273,8 +269,8 @@ def gate(threads, agent, root, globs):
     allowed |= {t["path"] for t in agent_threads if t["path"] not in unfinished}
     kept, reverted = [], {}
     for path, deleted in changed_tracked(root):
-        if is_risky(path, globs):
-            why = "risky path"
+        if path in moved:
+            why = "the base branch changed it since the review, so the fix would overwrite that"
         elif path in touched_unfinished:
             why = "the agent edited it but left a thread on it unfinished"
         elif path not in allowed:
@@ -351,6 +347,7 @@ def main(argv=None):
     g.add_argument("--plan", required=True)
     g.add_argument("--agent", required=True)
     g.add_argument("--root", default=".")
+    g.add_argument("--moved", help="file of paths (one per line) the base changed since the review's head")
     g.add_argument("--out", required=True)
     r = sub.add_parser("report")
     r.add_argument("--gate", required=True)
@@ -360,17 +357,20 @@ def main(argv=None):
     r.add_argument("--sign", required=True)
     r.add_argument("--out", required=True)
     a = ap.parse_args(argv)
-    globs = risky_globs()
     if a.cmd == "plan":
         nodes = json.loads(Path(a.threads).read_text())
         msg = Path(a.head_message).read_text() if a.head_message else ""
-        res = plan(nodes, a.head, a.root, globs, msg)
+        res = plan(nodes, a.head, a.root, msg)
     elif a.cmd == "gate":
         try:
             agent = json.loads(Path(a.agent).read_text())
         except (OSError, ValueError):
             agent = []
-        res = gate(json.loads(Path(a.plan).read_text()), agent if isinstance(agent, list) else [], a.root, globs)
+        try:
+            moved = set(Path(a.moved).read_text().splitlines()) if a.moved else set()
+        except OSError:
+            moved = set()
+        res = gate(json.loads(Path(a.plan).read_text()), agent if isinstance(agent, list) else [], a.root, moved)
     else:
         doc = json.loads(Path(a.gate).read_text())
         res = report(doc["threads"], a.sha, a.failure, a.sign, a.note)
