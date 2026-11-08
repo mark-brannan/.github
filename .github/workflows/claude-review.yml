@@ -188,19 +188,16 @@ name: Claude PR Review
 # for that run.
 #
 # The tier names a model; the reviewer's family check can move it, up and
-# never down. The tier's model stands unless its family coded the pull
-# request -- keeping cost where the tier put it. Then the review passes up
-# the ladder (Haiku, Sonnet, Opus, Fable) to the first family above that
-# coded none of it. The default tier's ladder stops at Opus, since a config
-# change does not need Fable (the easy-grind ledger, 2026-11-06): Sonnet
-# coded it, Opus reviews; Haiku coded it, Sonnet stands. The deep tier runs
-# between Opus and Fable: Opus coded it, Fable reviews; Fable coded it,
-# Opus, since nothing sits above Fable and the alternative is Fable
-# reviewing itself. Haiku reviews only what Haiku or no model coded (the
-# ledger, 2026-11-08: no Haiku reviewer for a Sonnet-written PR). When every
-# family on the ladder coded it, the least present of them reviews. The
-# summary says which family was picked and why, and the review is told so
-# it does not flag the switch.
+# never down, and only on the deep tier. The default tier's Sonnet stands
+# whoever coded the pull request: no more Opus or Fable reviews than the
+# tiers already buy, and a Sonnet review of Sonnet code over a Haiku one
+# (the easy-grind ledger, 2026-11-08). The deep tier runs between Opus and
+# Fable: Opus coded it, Fable reviews; Fable coded it, Opus, since nothing
+# sits above Fable and the alternative is Fable reviewing itself; Sonnet or
+# Haiku coded it, Opus stands. Haiku reviews only what Haiku or no model
+# coded. When every family on the ladder coded it, the least present of
+# them reviews. The summary says which family was picked and why, and the
+# review is told so it does not flag the switch.
 #
 # Then, with the token in hand, a budget probe asks the plan's usage endpoint
 # how much of each rate window is used. Past `budget-pause-at` percent on any
@@ -865,10 +862,11 @@ jobs:
           # (FAMILIES, PREFERENCE, TRAILER, pick_reviewer) is this logic's
           # other home, and a change to either belongs in both (the port to
           # pick_reviewer is card 17940010854a87b845). A switch goes up the
-          # ladder, never down: Haiku reviews only what Haiku or no model
-          # coded. One rule of this copy's own: the tier's model stands
-          # while its family coded none of the PR, so the tier keeps setting
-          # the cost.
+          # ladder, never down, and only on the deep tier: the default
+          # tier's Sonnet stands whoever coded the PR, and Haiku reviews
+          # only what Haiku or no model coded. One rule of this copy's own:
+          # the tier's model stands while its family coded none of the PR,
+          # so the tier keeps setting the cost.
           family_of() {
             local n=${1,,}
             case "$n" in
@@ -895,12 +893,13 @@ jobs:
             if [ "${coded[$f]}" -gt 0 ]; then coders="${coders:+$coders,}$f"; fi
           done
           tier_family=$(family_of "$model")
-          # Where a switch may go: up the ladder from the tier's family,
-          # never down; the default tier stops at Opus, and Fable, with
-          # nothing above it, steps down to Opus.
+          # Where a switch may go: up the ladder, never down, on the deep
+          # tier only; Fable, with nothing above it, steps down to Opus.
+          # The default tier's Sonnet stands whoever coded the PR; Haiku,
+          # should a tier ever name it, hands Haiku-coded work to Sonnet.
           case "$tier_family" in
-            haiku) order="haiku sonnet opus" ;;
-            sonnet) order="sonnet opus" ;;
+            haiku) order="haiku sonnet" ;;
+            sonnet) order= ;;
             opus) order="opus fable" ;;
             fable) order="fable opus" ;;
             *) order= ;;
@@ -909,7 +908,10 @@ jobs:
           family=${tier_family:-unknown}
           family_why="the tier's model; no trailer names its family"
           [ -n "$coders" ] || family_why="the tier's model; no trailer names a coder"
-          if [ -n "$tier_family" ] && [ "${coded[$tier_family]}" -gt 0 ]; then
+          if [ -n "$tier_family" ] && [ "${coded[$tier_family]}" -gt 0 ] && [ -z "$order" ]; then
+            family_why="the tier's model stands though its family ($tier_family) coded this PR; the default tier never switches, cost over a fresh family"
+          fi
+          if [ -n "$tier_family" ] && [ "${coded[$tier_family]}" -gt 0 ] && [ -n "$order" ]; then
             family=
             for f in $order; do
               if [ "${coded[$f]}" -eq 0 ]; then family=$f; break; fi
