@@ -98,3 +98,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261106t210701z
 - the family switch's direction follows the tier: deep never below Opus (Opus-authored to Fable), default sideways or down (Sonnet-authored to Haiku) Undo: one line in the family switch ([#416](https://github.com/mark-brannan/claude/pull/416))
+
+### 20261108t034828z
+- The review workflow's default tier ladder stops at Opus (Sonnet coded it, Opus reviews; never Fable), derived from the 2026-11-06 line that config changes do not need Fable; a Sonnet+Opus co-authored default-tier PR goes to the least present of the two. Undo: add fable to the sonnet) and haiku) orders in the tier-pick step ([#121](https://github.com/mark-brannan/.github/pull/121))
