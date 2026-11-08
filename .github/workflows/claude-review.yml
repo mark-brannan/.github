@@ -187,15 +187,20 @@ name: Claude PR Review
 # `review:deep` label included. A count that fails leaves the cap unenforced
 # for that run.
 #
-# The tier names a model; the reviewer's family check can move it, in the
-# direction the tier sets. The tier's model stands unless its family coded
-# the pull request -- keeping cost where the tier put it. Then the deep tier
-# never goes below Opus: Opus coded it, Fable reviews; Fable coded it, Opus;
-# Sonnet or Haiku coded it, Opus stands. The default tier goes sideways or
-# down, never up: Sonnet coded it, Haiku reviews; Opus, Fable or Haiku coded
-# it, Sonnet stands. When every family the tier may move to coded it, the
-# least present of them reviews. The summary says which family was picked
-# and why, and the review is told so it does not flag the switch.
+# The tier names a model; the reviewer's family check can move it, up and
+# never down. The tier's model stands unless its family coded the pull
+# request -- keeping cost where the tier put it. Then the review passes up
+# the ladder (Haiku, Sonnet, Opus, Fable) to the first family above that
+# coded none of it. The default tier's ladder stops at Opus, since a config
+# change does not need Fable (the easy-grind ledger, 2026-11-06): Sonnet
+# coded it, Opus reviews; Haiku coded it, Sonnet stands. The deep tier runs
+# between Opus and Fable: Opus coded it, Fable reviews; Fable coded it,
+# Opus, since nothing sits above Fable and the alternative is Fable
+# reviewing itself. Haiku reviews only what Haiku or no model coded (the
+# ledger, 2026-11-08: no Haiku reviewer for a Sonnet-written PR). When every
+# family on the ladder coded it, the least present of them reviews. The
+# summary says which family was picked and why, and the review is told so
+# it does not flag the switch.
 #
 # Then, with the token in hand, a budget probe asks the plan's usage endpoint
 # how much of each rate window is used. Past `budget-pause-at` percent on any
@@ -858,12 +863,12 @@ jobs:
           # trailers, decided here because a headless run cannot switch model.
           # A declared DRY break: mark-brannan/claude lib/critical_review.py
           # (FAMILIES, PREFERENCE, TRAILER, pick_reviewer) is this logic's
-          # other home, and a change to either belongs in both. The tier sets
-          # which way a switch may go: the deep tier never below Opus, the
-          # default sideways or down, never up (the port to pick_reviewer is
-          # card 17940010854a87b845). One rule
-          # of this copy's own: the tier's model stands while its family
-          # coded none of the PR, so the tier keeps setting the cost.
+          # other home, and a change to either belongs in both (the port to
+          # pick_reviewer is card 17940010854a87b845). A switch goes up the
+          # ladder, never down: Haiku reviews only what Haiku or no model
+          # coded. One rule of this copy's own: the tier's model stands
+          # while its family coded none of the PR, so the tier keeps setting
+          # the cost.
           family_of() {
             local n=${1,,}
             case "$n" in
@@ -890,14 +895,17 @@ jobs:
             if [ "${coded[$f]}" -gt 0 ]; then coders="${coders:+$coders,}$f"; fi
           done
           tier_family=$(family_of "$model")
-          # Where the tier lets a switch go: the deep tier between Opus and
-          # Fable alone; the default tier its own family and those below it.
-          if [ "$decision" = deep ]; then
-            order="opus fable" direction="the deep tier never goes below Opus"
-          else
-            order=$(echo "fable opus sonnet haiku" | sed -E "s/^.*\<(${tier_family:-sonnet})\>/\1/")
-            direction="the default tier goes sideways or down, never up"
-          fi
+          # Where a switch may go: up the ladder from the tier's family,
+          # never down; the default tier stops at Opus, and Fable, with
+          # nothing above it, steps down to Opus.
+          case "$tier_family" in
+            haiku) order="haiku sonnet opus" ;;
+            sonnet) order="sonnet opus" ;;
+            opus) order="opus fable" ;;
+            fable) order="fable opus" ;;
+            *) order= ;;
+          esac
+          direction="a switch goes up, never down"
           family=${tier_family:-unknown}
           family_why="the tier's model; no trailer names its family"
           [ -n "$coders" ] || family_why="the tier's model; no trailer names a coder"
