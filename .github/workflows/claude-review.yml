@@ -316,6 +316,11 @@ on:
         required: false
         type: boolean
         default: true
+      pr-number:
+        description: Start only the fixer's conflict handling on this one pull request, read from the API rather than from a pull_request event, so a caller started by workflow_dispatch or a schedule can use it. Empty (the default) leaves the workflow as it was, driven by the caller's pull_request event. When set, triage, review, checks, arete-hold and record do not run, nothing is reviewed or posted but the fixer's conflict comment, the [easy]-fix part stays off, and a draft, fork, closed or fixer-authored pull request is skipped.
+        required: false
+        type: string
+        default: ''
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: false
@@ -342,7 +347,7 @@ env:
 # running one and then skips on the fingerprint. The group is the whole run,
 # not one job: triage reads the fingerprint the record job saves at the end.
 concurrency:
-  group: claude-review-${{ github.event.pull_request.number }}
+  group: claude-review-${{ inputs.pr-number || github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:
@@ -355,6 +360,7 @@ jobs:
     # Skip drafts, and skip fork pull requests -- forks cannot read the
     # secret, so a run there only produces a red X that means nothing.
     if: >-
+      inputs.pr-number == '' &&
       !github.event.pull_request.draft &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
@@ -2033,24 +2039,58 @@ jobs:
   # triage that passed, whether the review then ran, posted or was skipped;
   # the fixes still need a review this run posted. A conflict that appears
   # later, when the base moves, waits for the next pull_request event.
+  # With the `pr-number` input it need not wait: a caller started by
+  # workflow_dispatch names the pull request, and only this job's conflict
+  # handling runs on it (see the `target` step).
   fixer:
     needs: [triage, review]
-    if: always() && needs.triage.result == 'success' && (needs.review.result == 'success' || needs.review.result == 'skipped')
+    if: always() && (inputs.pr-number != '' || (needs.triage.result == 'success' && (needs.review.result == 'success' || needs.review.result == 'skipped')))
     runs-on: ubuntu-latest
     timeout-minutes: 15  # stand-in until three runs are measured
     concurrency:
-      group: claude-fixer-${{ github.event.pull_request.number }}
+      group: claude-fixer-${{ inputs.pr-number || github.event.pull_request.number }}
       cancel-in-progress: false
     permissions:
       contents: read
       pull-requests: write
     env:
       CLAUDE_STOP_COMMIT: off
-      PR: ${{ github.event.pull_request.number }}
+      PR: ${{ inputs.pr-number || github.event.pull_request.number }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       FIXER_MODEL: claude-haiku-5-5
     steps:
-      - name: Check the agent App is configured and the PR has not opted out
+      # Only with `pr-number`: there is no pull_request event, so the facts the
+      # job reads from it are read here, once, and the skips triage would have
+      # made (draft, fork) are made here, with a closed pull request and a head
+      # the fixer wrote. HEAD_SHA is pinned for the steps below, which compare
+      # the live head against it; the branch and head reach the expressions
+      # through this step's outputs.
+      - if: inputs.pr-number != ''
+        name: Resolve the chosen pull request
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          skip() { echo "skip=true" >> "$GITHUB_OUTPUT"; echo "### Claude fixer: skipped ($1)" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          case "$PR" in ''|*[!0-9]*) echo "::error::pr-number must be a pull request number"; exit 1 ;; esac
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR") || { echo "::error::could not read pull request $PR"; exit 1; }
+          [ "$(jq -r .state <<<"$pr")" = open ] || skip "the pull request is not open"
+          [ "$(jq -r .draft <<<"$pr")" = false ] || skip "draft"
+          [ "$(jq -r .head.repo.full_name <<<"$pr")" = "$GITHUB_REPOSITORY" ] || skip "fork"
+          head_sha=$(jq -r .head.sha <<<"$pr")
+          msg=$(gh api "repos/$GITHUB_REPOSITORY/commits/$head_sha" --jq .commit.message) \
+            || { echo "::error::could not read the head commit"; exit 1; }
+          # The same test fixer.py's plan applies: the trailer opens a line.
+          if printf '%s\n' "$msg" | grep -q '^[[:space:]]*Claude-Fixer-Run:'; then
+            skip "the head is the fixer's own commit"
+          fi
+          echo "head-sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "head-ref=$(jq -r .head.ref <<<"$pr")" >> "$GITHUB_OUTPUT"
+          echo "HEAD_SHA=$head_sha" >> "$GITHUB_ENV"
+
+      - if: steps.target.outputs.skip != 'true'
+        name: Check the agent App is configured and the PR has not opted out
         id: app
         env:
           APP_ID: ${{ secrets.AGENT_BOT_APP_ID }}
@@ -2113,7 +2153,7 @@ jobs:
       - if: steps.conflict.outputs.go == 'true'
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ steps.target.outputs.head-sha || github.event.pull_request.head.sha }}
           persist-credentials: false
           fetch-depth: ${{ steps.conflict.outputs.conflicting != 'true' && 1 || 0 }}
 
@@ -2238,8 +2278,8 @@ jobs:
           execution-file: ${{ steps.conflict-agent.outputs.execution_file }}
           what: claude-fixer
           model: ${{ env.FIXER_MODEL }}
-          pr: ${{ github.event.pull_request.number }}
-          fields: '{"head_sha":"${{ github.event.pull_request.head.sha }}","step":"conflicts"}'
+          pr: ${{ inputs.pr-number || github.event.pull_request.number }}
+          fields: '{"head_sha":"${{ steps.target.outputs.head-sha || github.event.pull_request.head.sha }}","step":"conflicts"}'
 
       # The merge's index back, then fixer.py's check: markers left, a file
       # gone or unsafe sends the conflict to the author (the merge aborted);
@@ -2406,7 +2446,7 @@ jobs:
           SCRIPT: ${{ steps.tools.outputs.script }}
           SCRIPT_SHA: ${{ steps.merge.outputs.script-sha }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
-          BRANCH: ${{ github.event.pull_request.head.ref }}
+          BRANCH: ${{ steps.target.outputs.head-ref || github.event.pull_request.head.ref }}
           BASE: ${{ steps.conflict.outputs.base }}
           BASE_SHA: ${{ steps.merge.outputs.base-sha }}
         run: |
