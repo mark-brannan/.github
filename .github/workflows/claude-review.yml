@@ -22,11 +22,13 @@ name: Claude PR Review
 #
 #   critical-review  the review itself: tagged findings as inline threads and
 #                    one summary comment, held to the repository's own
-#                    instructions. It runs on a model family that wrote none
-#                    of the pull request -- a reviewer that shares the coder's
-#                    blind spots is a second opinion in name only -- so triage
-#                    picks the family from the Co-Authored-By trailers before
-#                    anything starts; a headless run cannot switch model.
+#                    instructions. On the deep tier it runs on a model family
+#                    that wrote none of the pull request -- a reviewer that
+#                    shares the coder's blind spots is a second opinion in
+#                    name only -- so triage picks the family from the
+#                    Co-Authored-By trailers before anything starts; a
+#                    headless run cannot switch model. The default tier's
+#                    model stands whoever coded it.
 #   maxims-check     the software maxims the diff breaks (DRY, YAGNI, POLA
 #                    and their rivals). A table of findings with no verdict.
 #   arete-check      what the change does to the people it touches, the good
@@ -187,15 +189,19 @@ name: Claude PR Review
 # `review:deep` label included. A count that fails leaves the cap unenforced
 # for that run.
 #
-# The tier names a model; the reviewer's family check can move it, in the
-# direction the tier sets. The tier's model stands unless its family coded
-# the pull request -- keeping cost where the tier put it. Then the deep tier
-# never goes below Opus: Opus coded it, Fable reviews; Fable coded it, Opus;
-# Sonnet or Haiku coded it, Opus stands. The default tier goes sideways or
-# down, never up: Sonnet coded it, Haiku reviews; Opus, Fable or Haiku coded
-# it, Sonnet stands. When every family the tier may move to coded it, the
-# least present of them reviews. The summary says which family was picked
-# and why, and the review is told so it does not flag the switch.
+# The tier names a model; the reviewer's family check can move it, up and
+# never down, and only on the deep tier. The default tier's model stands
+# whoever coded the pull request, so the family check buys no more Opus
+# or Fable reviews than the tiers already do and gives Sonnet code a
+# Sonnet review, not a Haiku one. The deep tier runs between Opus and
+# Fable: Opus coded it, Fable reviews; Fable coded it, Opus, since nothing
+# sits above Fable and the alternative is Fable reviewing itself; Sonnet or
+# Haiku coded it, Opus stands. Both rules key on the tier, not on the model
+# a caller named. No switch lands on Haiku, and Haiku reviews no PR another
+# family coded: a Haiku default tier hands such a PR to Sonnet. When every
+# family on the ladder coded it, the least present of them reviews. The
+# summary says which family was picked and why, and the review is told so
+# it does not flag the switch.
 #
 # Then, with the token in hand, a budget probe asks the plan's usage endpoint
 # how much of each rate window is used. Past `budget-pause-at` percent on any
@@ -858,12 +864,14 @@ jobs:
           # trailers, decided here because a headless run cannot switch model.
           # A declared DRY break: mark-brannan/claude lib/critical_review.py
           # (FAMILIES, PREFERENCE, TRAILER, pick_reviewer) is this logic's
-          # other home, and a change to either belongs in both. The tier sets
-          # which way a switch may go: the deep tier never below Opus, the
-          # default sideways or down, never up (the port to pick_reviewer is
-          # card 17940010854a87b845). One rule
-          # of this copy's own: the tier's model stands while its family
-          # coded none of the PR, so the tier keeps setting the cost.
+          # other home, and a change to either belongs in both (the port to
+          # pick_reviewer is card 17940010854a87b845). A switch goes up the
+          # ladder, never down, and only on the deep tier: the default
+          # tier's model stands whoever coded the PR. No switch lands on
+          # Haiku, and Haiku reviews no PR another family coded. One rule
+          # of this copy's own:
+          # the tier's model stands while its family coded none of the PR,
+          # so the tier keeps setting the cost.
           family_of() {
             local n=${1,,}
             case "$n" in
@@ -890,18 +898,33 @@ jobs:
             if [ "${coded[$f]}" -gt 0 ]; then coders="${coders:+$coders,}$f"; fi
           done
           tier_family=$(family_of "$model")
-          # Where the tier lets a switch go: the deep tier between Opus and
-          # Fable alone; the default tier its own family and those below it.
+          # Where a switch may go, keyed on the tier, not on the model a
+          # caller named: the deep tier runs between Opus and Fable, up and
+          # never below Opus, and Fable, with nothing above it, steps down
+          # to Opus; the default tier's model stands whoever coded the PR,
+          # with one exception: Haiku reviews no PR another family coded,
+          # so a Haiku default tier hands such a PR to Sonnet.
           if [ "$decision" = deep ]; then
-            order="opus fable" direction="the deep tier never goes below Opus"
+            case "$tier_family" in
+              fable) order="fable opus" ;;
+              *) order="opus fable" ;;
+            esac
+            direction="the deep tier runs between Opus and Fable, never below Opus"
           else
-            order=$(echo "fable opus sonnet haiku" | sed -E "s/^.*\<(${tier_family:-sonnet})\>/\1/")
-            direction="the default tier goes sideways or down, never up"
+            order=
+            direction="the default tier's model stands whoever coded the PR"
           fi
+          others=$((coded[fable] + coded[opus] + coded[sonnet]))
           family=${tier_family:-unknown}
           family_why="the tier's model; no trailer names its family"
           [ -n "$coders" ] || family_why="the tier's model; no trailer names a coder"
-          if [ -n "$tier_family" ] && [ "${coded[$tier_family]}" -gt 0 ]; then
+          if [ -z "$order" ] && [ "$tier_family" = haiku ] && [ "$others" -gt 0 ]; then
+            family=sonnet
+            family_why="Haiku reviews no PR another family coded ($coders coded this one); Sonnet stands in"
+            model=$(model_of "$family")
+          elif [ -z "$order" ] && [ -n "$tier_family" ] && [ "${coded[$tier_family]}" -gt 0 ]; then
+            family_why="the tier's model stands though its family ($tier_family) coded this PR, as $direction"
+          elif [ -n "$order" ] && [ -n "$tier_family" ] && [ "${coded[$tier_family]}" -gt 0 ]; then
             family=
             for f in $order; do
               if [ "${coded[$f]}" -eq 0 ]; then family=$f; break; fi
