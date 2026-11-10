@@ -346,8 +346,11 @@ env:
 # again. The common trigger here is a Mergify update, which queues behind the
 # running one and then skips on the fingerprint. The group is the whole run,
 # not one job: triage reads the fingerprint the record job saves at the end.
+# A call with `pr-number` runs only the fixer, so it takes its own group: in
+# the review group it would replace a queued review of the author's newest
+# push, and wait behind a full review.
 concurrency:
-  group: claude-review-${{ inputs.pr-number || github.event.pull_request.number }}
+  group: claude-review-${{ inputs.pr-number != '' && format('fix-{0}', inputs.pr-number) || github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:
