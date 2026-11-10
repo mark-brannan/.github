@@ -2051,7 +2051,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15  # stand-in until three runs are measured
     concurrency:
-      group: claude-fixer-${{ inputs.pr-number || github.event.pull_request.number }}
+      # Split like the run group: a call with `pr-number` must not replace a
+      # pending fixer holding the easy fixes for the author's newest push.
+      group: claude-fixer-${{ inputs.pr-number != '' && format('fix-{0}', inputs.pr-number) || github.event.pull_request.number }}
       cancel-in-progress: false
     permissions:
       contents: read
