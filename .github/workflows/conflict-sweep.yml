@@ -86,8 +86,11 @@ on:
       AGENT_BOT_PRIVATE_KEY:
         required: false
 
+# Not `conflict-sweep`: a caller that keeps the per-repo copy's
+# `concurrency: group: conflict-sweep` would share the group with its own
+# called workflow, and GitHub cancels both as a deadlock.
 concurrency:
-  group: conflict-sweep
+  group: shared-conflict-sweep
   cancel-in-progress: false
 
 permissions:
@@ -133,8 +136,18 @@ jobs:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           FORCE: ${{ inputs.force }}
+          HAS_APP: ${{ secrets.AGENT_BOT_APP_ID != '' && secrets.AGENT_BOT_PRIVATE_KEY != '' }}
         run: |
           set -uo pipefail
+          case "$MAX_NUDGES" in ''|*[!0-9]*) echo "::error::max-nudges must be a whole number, got '$MAX_NUDGES'"; exit 1 ;; esac
+          # Without the App the fixer skips and its job still succeeds, which
+          # `mark` would read as handled: pick nothing, so no head is marked.
+          if [ "$HAS_APP" != true ]; then
+            echo "::warning::AGENT_BOT_APP_ID or AGENT_BOT_PRIVATE_KEY is not passed; nothing handed over"
+            echo "prs=[]" >> "$GITHUB_OUTPUT"
+            echo "heads=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # A failed listing is a failed job, never an empty list.
           if ! list=$(gh pr list --state open --draft=false --limit 100 --label "$CONFLICT_LABEL" \
                         --search '-label:"fixer:skip"' --json number,isCrossRepository \
@@ -144,6 +157,8 @@ jobs:
           picked=()
           heads=()
           for pr in $list; do
+            # Reset per PR: a failed read must not inherit the last PR's state.
+            state=UNKNOWN
             for _ in 1 2 3 4 5; do
               info=$(gh pr view "$pr" --json mergeable,headRefOid) || { info='{}'; break; }
               state=$(jq -r '.mergeable // "UNKNOWN"' <<<"$info")
@@ -202,8 +217,6 @@ jobs:
       AGENT_BOT_PRIVATE_KEY: ${{ secrets.AGENT_BOT_PRIVATE_KEY }}
     with:
       pr-number: ${{ matrix.pr }}
-      allowed-bots: mergify[bot],mark-brannan-release-please[bot],claude[bot],mark-brannan-agent[bot]
-      allowed-tools: ''
 
   # Settles the pending status the pick wrote: `success` when the fixer ran
   # for every picked PR, `failure` otherwise, which makes the heads eligible
