@@ -50,7 +50,7 @@ name: Conflict sweep
 #     contents: read
 #   jobs:
 #     sweep:
-#       if: github.event_name != 'pull_request' || github.event.label.name == 'dequeued'
+#       if: github.event_name != 'pull_request' || (github.event.label.name == 'dequeued' && !github.event.pull_request.head.repo.fork)
 #       permissions:
 #         contents: read
 #         pull-requests: write
@@ -190,7 +190,7 @@ jobs:
             heads+=("$pr:$sha")
             echo "  picked #$pr at ${sha:0:8}"
           done
-          prs=$(jq -cn '$ARGS.positional | map(tonumber)' --args ${picked[@]+"${picked[@]}"})
+          prs=$(jq -cn '$ARGS.positional' --args ${picked[@]+"${picked[@]}"})
           echo "prs=$prs" >> "$GITHUB_OUTPUT"
           echo "heads=$(jq -cn '$ARGS.positional' --args ${heads[@]+"${heads[@]}"})" >> "$GITHUB_OUTPUT"
           echo "### Conflict sweep: ${#picked[@]} handed to the fixer ($prs)" >> "$GITHUB_STEP_SUMMARY"
@@ -224,7 +224,7 @@ jobs:
   # every PR picked in this run; at MAX_NUDGES that is acceptable.
   mark:
     needs: [sweep, fix]
-    if: always() && needs.sweep.outputs.prs != '[]'
+    if: always() && needs.sweep.result == 'success' && needs.sweep.outputs.prs != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
