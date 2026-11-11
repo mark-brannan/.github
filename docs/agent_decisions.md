@@ -101,3 +101,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261108t034828z
 - The review workflow's default tier ladder stops at Opus (Sonnet coded it, Opus reviews; never Fable), derived from the 2026-11-06 line that config changes do not need Fable; a Sonnet+Opus co-authored default-tier PR goes to the least present of the two. Undo: add fable to the sonnet) and haiku) orders in the tier-pick step ([#121](https://github.com/mark-brannan/.github/pull/121))
+
+### 20261111t175417z
+- Conflict sweep: wakes on Has Conflict instead of dequeued; push to main kept as retry; Mergify rule labels drafts too; delay measured from the later base or branch update before the label Undo: restore the dequeued trigger, drop push-to-main, add -draft to the Mergify rule ([#124](https://github.com/mark-brannan/.github/pull/124))
