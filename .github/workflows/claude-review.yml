@@ -2066,8 +2066,7 @@ jobs:
     steps:
       # Only with `pr-number`: there is no pull_request event, so the facts the
       # job reads from it are read here, once, and the skips triage would have
-      # made (draft, fork) are made here, with a closed pull request and a head
-      # the fixer wrote. HEAD_SHA is pinned for the steps below, which compare
+      # made (draft, fork) are made here, with a closed pull request. HEAD_SHA is pinned for the steps below, which compare
       # the live head against it; the branch and head reach the expressions
       # through this step's outputs.
       - if: inputs.pr-number != ''
@@ -2084,12 +2083,9 @@ jobs:
           [ "$(jq -r .draft <<<"$pr")" = false ] || skip "draft"
           [ "$(jq -r .head.repo.full_name <<<"$pr")" = "$GITHUB_REPOSITORY" ] || skip "fork"
           head_sha=$(jq -r .head.sha <<<"$pr")
-          msg=$(gh api "repos/$GITHUB_REPOSITORY/commits/$head_sha" --jq .commit.message) \
-            || { echo "::error::could not read the head commit"; exit 1; }
-          # The same test fixer.py's plan applies: the trailer opens a line.
-          if printf '%s\n' "$msg" | grep -q '^[[:space:]]*Claude-Fixer-Run:'; then
-            skip "the head is the fixer's own commit"
-          fi
+          # No skip for a head the fixer wrote: the trailer guards the
+          # `synchronize` its own push fires, which this call never is, and a
+          # fixer merge that conflicts again once main moves still needs one.
           echo "head-sha=$head_sha" >> "$GITHUB_OUTPUT"
           echo "head-ref=$(jq -r .head.ref <<<"$pr")" >> "$GITHUB_OUTPUT"
           echo "HEAD_SHA=$head_sha" >> "$GITHUB_ENV"
