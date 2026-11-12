@@ -132,23 +132,35 @@ def apply_body(threads, text):
     return new if changed else None
 
 
-def easy_threads(nodes, head):
+def easy_threads(nodes, head, skipped=None):
     """This head's unresolved claude[bot] threads whose finding is tagged
     [easy], with no reply yet (a reply means someone, or an earlier fixer
-    run, has already answered it)."""
+    run, has already answered it). `skipped`, when given, collects a
+    (url, reason) for each [easy] bot thread that is passed over."""
     out = []
     for n in nodes:
         comments = (n.get("comments") or {}).get("nodes") or []
-        if n.get("isResolved") or not comments:
+        if not comments:
             continue
         first = comments[0]
         author = first.get("author") or {}
         # A login alone is not enough: `claude` is also a User account, and
         # anyone can comment on a public PR.
         if (author.get("__typename") != "Bot" or author.get("login") not in BOT_LOGINS
-                or not EASY.match(first.get("body") or "")
-                or ((first.get("originalCommit") or {}).get("oid") != head)
-                or (n.get("comments") or {}).get("totalCount", len(comments)) != 1):
+                or not EASY.match(first.get("body") or "")):
+            continue
+        total = (n.get("comments") or {}).get("totalCount", len(comments))
+        why = None
+        if n.get("isResolved"):
+            why = "resolved"
+        elif (first.get("originalCommit") or {}).get("oid") != head:
+            why = "not this head"
+        elif total != 1:
+            who = sorted({(c.get("author") or {}).get("login") or "?" for c in comments[1:]})
+            why = "replied by " + (", ".join(who) or "someone")
+        if why:
+            if skipped is not None:
+                skipped.append((first.get("url", ""), why))
             continue
         out.append({
             "thread_id": n["id"],
@@ -240,12 +252,12 @@ def by_fixer(message):
     return any(ln.strip().startswith(TRAILER) for ln in (message or "").splitlines())
 
 
-def plan(nodes, head, root, head_message="", moved=()):
+def plan(nodes, head, root, head_message="", moved=(), skipped=None):
     """`moved` is the paths a merge with the base changed in the checkout
     before the plan: the review's line numbers on them may no longer hold."""
     if by_fixer(head_message):
         return []
-    threads = easy_threads(nodes, head)
+    threads = easy_threads(nodes, head, skipped)
     by_path = {}
     for t in threads:
         fences = suggestions(t["body"])
@@ -682,7 +694,11 @@ def main(argv=None):
             moved = set(Path(a.moved).read_text().splitlines()) if a.moved else set()
         except OSError:
             moved = set()
-        res = plan(nodes, a.head, a.root, msg, moved)
+        skipped = []
+        res = plan(nodes, a.head, a.root, msg, moved, skipped)
+        if skipped and os.environ.get("GITHUB_STEP_SUMMARY"):
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                f.write("".join(f"- skipped [easy] thread {u}: {w}\n" for u, w in skipped))
         try:
             pr_body = Path(a.pr_body).read_text() if a.pr_body else None
         except OSError:
