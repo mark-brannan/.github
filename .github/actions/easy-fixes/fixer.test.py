@@ -157,6 +157,20 @@ class Plan(unittest.TestCase):
         self.assertEqual([(t["thread_id"], t["status"]) for t in res], [("T6", "agent")])
         self.assertEqual(r.read("a.txt"), "1\n")
 
+    def test_skipped_easy_threads_are_listed_with_why(self):
+        r = Repo({"a.txt": "1\n"})
+        summ = Path(r.tmp("step-summary.md"))
+        summ.unlink(missing_ok=True)
+        os.environ["GITHUB_STEP_SUMMARY"] = str(summ)
+        try:
+            r.plan([node(3, "a.txt", 1, fence("x\n"), commit="b" * 40),
+                    node(5, "a.txt", 1, fence("x\n"), resolved=True),
+                    node(1, "a.txt", 1, "🤖 [nit] fix it")])
+        finally:
+            del os.environ["GITHUB_STEP_SUMMARY"]
+        lines = summ.read_text().splitlines()
+        self.assertEqual(sorted(l.rsplit(": ", 1)[1] for l in lines), ["not this head", "resolved"])
+
     def test_a_user_named_claude_is_not_the_bot(self):
         r = Repo({"src/x.py": "ok\n"})
         res = r.plan([node(1, "src/x.py", 1, fence("evil\n"), kind="User"),
