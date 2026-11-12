@@ -1,0 +1,273 @@
+name: Conflict sweep
+
+# Shared by every repository: Mergify labels an open pull request `Has
+# Conflict` when it conflicts with its base and clears the label once it no
+# longer does (the shared .mergify.yml). That label event wakes this workflow,
+# which hands each labelled pull request to the shared fixer, which merges the base in and resolves
+# small, plain conflicts with Haiku (the `fixer` job in claude-review.yml here).
+# The fixer reads `mergeable` live but only wakes on a pull_request event, so a
+# conflict that appears because the base moved would wait for the author's
+# next push. This workflow supplies the missing call: it starts claude-review
+# with `pr-number`, which runs only the fixer's conflict handling. Nothing is
+# reviewed, so a hand-off costs one Haiku run, not a full review plus CI. A
+# conflict the fixer cannot resolve is left as it was, with a comment on the
+# pull request saying why.
+#
+# Cost per run: one fixer run per conflicting pull request, at most
+# `max-nudges`, drawing on the account's concurrent-job cap. A pushed head is
+# handed over once unless the fixer run errors.
+#
+# Needs no App token of its own: the fixer job mints the agent App's token
+# itself from the secrets passed to it. Without them it skips with a warning.
+#
+# Skipped: drafts, forks (claude-review skips them too), PRs labelled
+# `fixer:skip`, and a head already handed over. A conflict the fixer escalated
+# stays on its head, so the `conflict-sweep` commit status on that head keeps
+# the next run from handing it over again; a new push to the branch is a new
+# head and is eligible. The status is `pending` from the pick, then `success`
+# once the fixer ran (it either resolved the conflict or commented why not) or
+# `failure` if it errored; only `success` blocks a hand-over, so an errored run
+# is retried by the next one. `force` ignores the status.
+#
+# Every run considers every labelled pull request, not only the one whose
+# label woke it, so a queued run the concurrency group replaces loses nothing.
+# A push to main runs it too: that retries a head whose fixer run errored.
+#
+# Each hand-over records how long the label took, so Mergify's delay can be
+# read later from GitHub alone, on any machine: the pending `conflict-sweep`
+# status on the head (statuses are kept for good) and a `conflict-latency`
+# notice on the run carry the push that caused the conflict (the later of the
+# last push to the base or to the branch before the label), the label time
+# and the hand-over time. .github/scripts/conflict_latency.py reads the notices
+# back across repos.
+#
+# A caller grants every scope the jobs below ask for; a called job that asks
+# for more than its caller allows fails at startup:
+#
+#   name: Conflict sweep
+#   on:
+#     push:
+#       branches: [main]
+#     pull_request:
+#       types: [labeled]
+#     workflow_dispatch:
+#       inputs:
+#         force:
+#           description: Hand a conflicting head to the fixer even if it was handed over before
+#           type: boolean
+#           default: false
+#   permissions:
+#     contents: read
+#   jobs:
+#     sweep:
+#       if: github.event_name != 'pull_request' || (github.event.label.name == 'Has Conflict' && !github.event.pull_request.head.repo.fork)
+#       permissions:
+#         contents: read
+#         pull-requests: write
+#         issues: read
+#         statuses: write
+#         id-token: write
+#       uses: mark-brannan/.github/.github/workflows/conflict-sweep.yml@main
+#       secrets:
+#         CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+#         AGENT_BOT_APP_ID: ${{ secrets.AGENT_BOT_APP_ID }}
+#         AGENT_BOT_PRIVATE_KEY: ${{ secrets.AGENT_BOT_PRIVATE_KEY }}
+#       with:
+#         force: ${{ inputs.force == true }}
+
+on:
+  workflow_call:
+    inputs:
+      force:
+        description: Hand a conflicting head to the fixer even if it was handed over before
+        required: false
+        type: boolean
+        default: false
+      max-nudges:
+        description: The most fixer runs one sweep can start
+        required: false
+        type: string
+        default: '2'
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: false
+      AGENT_BOT_APP_ID:
+        required: false
+      AGENT_BOT_PRIVATE_KEY:
+        required: false
+
+# Not `conflict-sweep`: a caller that keeps the per-repo copy's
+# `concurrency: group: conflict-sweep` would share the group with its own
+# called workflow, and GitHub cancels both as a deadlock.
+concurrency:
+  group: shared-conflict-sweep
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  MAX_NUDGES: ${{ inputs.max-nudges }}
+  CONFLICT_LABEL: Has Conflict
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: write
+    outputs:
+      prs: ${{ steps.pick.outputs.prs }}
+      heads: ${{ steps.pick.outputs.heads }}
+    steps:
+      - name: Pick the conflicting pull requests to hand over
+        id: pick
+        env:
+          # No checkout here, so gh cannot find the repository from git.
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+          HAS_APP: ${{ secrets.AGENT_BOT_APP_ID != '' && secrets.AGENT_BOT_PRIVATE_KEY != '' }}
+        run: |
+          set -uo pipefail
+          case "$MAX_NUDGES" in ''|*[!0-9]*) echo "::error::max-nudges must be a whole number, got '$MAX_NUDGES'"; exit 1 ;; esac
+          # Without the App the fixer skips and its job still succeeds, which
+          # `mark` would read as handled: pick nothing, so no head is marked.
+          if [ "$HAS_APP" != true ]; then
+            echo "::warning::AGENT_BOT_APP_ID or AGENT_BOT_PRIVATE_KEY is not passed; nothing handed over"
+            echo "prs=[]" >> "$GITHUB_OUTPUT"
+            echo "heads=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A failed listing is a failed job, never an empty list.
+          if ! list=$(gh pr list --state open --draft=false --limit 100 --label "$CONFLICT_LABEL" \
+                        --search '-label:"fixer:skip"' \
+                        --json number,isCrossRepository,mergeable,headRefOid,baseRefName,headRefName \
+                        --jq '.[] | select(.isCrossRepository | not) | [.number, .mergeable, .headRefOid, .baseRefName, .headRefName] | @tsv'); then
+            echo "::error::could not list pull requests"; exit 1
+          fi
+          # Epoch seconds of the newest update to a branch at or before $2, or
+          # nothing; a failed read only loses the measurement.
+          last_push() {
+            gh api "repos/$GH_REPO/activity?ref=$(jq -rn --arg r "refs/heads/$1" '$r | @uri')&per_page=30" \
+              --jq ".[] | select(.activity_type != \"branch_deletion\" and .timestamp <= \"$2\") | .timestamp" \
+              2>/dev/null | head -1 | xargs -r -I{} date -ud {} +%s
+          }
+          picked=()
+          heads=()
+          echo "| PR | caused by | caused at | labelled after | handed over after |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          while IFS=$'\t' read -r -u 3 pr state sha base head; do
+            [ -n "$pr" ] || continue
+            # The label says Mergify saw a conflict; re-read only when the
+            # listing's own read is still being computed.
+            for _ in 1 2 3 4 5; do
+              [ "$state" != UNKNOWN ] && break
+              sleep 3
+              info=$(gh pr view "$pr" --json mergeable,headRefOid) || break
+              state=$(jq -r '.mergeable // "UNKNOWN"' <<<"$info")
+              sha=$(jq -r .headRefOid <<<"$info")
+            done
+            echo "PR #$pr: $state"
+            [ "$state" = CONFLICTING ] || continue
+            if ! seen=$(gh api "repos/$GH_REPO/commits/$sha/statuses" \
+                     --jq '[.[] | select(.context == "conflict-sweep" and .state == "success")] | length'); then
+              echo "::warning::PR #$pr: could not read statuses; left for the next push"; continue
+            fi
+            if [ "$seen" != 0 ] && [ "$FORCE" != true ]; then
+              echo "  head ${sha:0:8} was handed over before; left alone"; continue
+            fi
+            if [ "${#picked[@]}" -ge "$MAX_NUDGES" ]; then
+              echo "::warning::PR #$pr conflicts but $MAX_NUDGES were picked already; the next sweep takes it"
+              continue
+            fi
+            # How long Mergify took: the label time against the push that
+            # caused the conflict, the later of the base's and the branch's.
+            now=$(date -u +%s)
+            labelled=$(gh api "repos/$GH_REPO/issues/$pr/events?per_page=100" --paginate \
+                         --jq ".[] | select(.event == \"labeled\" and .label.name == \"$CONFLICT_LABEL\") | .created_at" \
+                         2>/dev/null | tail -1)
+            desc="Handed to the fixer"
+            if [ -n "$labelled" ]; then
+              l=$(date -ud "$labelled" +%s)
+              b=$(last_push "$base" "$labelled"); h=$(last_push "$head" "$labelled")
+              cause=base; c=${b:-0}
+              if [ "${h:-0}" -gt "$c" ]; then cause=branch; c=$h; fi
+              if [ "$c" -gt 0 ]; then
+                cat=$(date -ud "@$c" +%FT%TZ)
+                desc="Handed to the fixer; labelled $((l - c))s after the $cause push, handed $((now - l))s later"
+                echo "::notice title=conflict-latency::pr=$pr head=$sha event=$GITHUB_EVENT_NAME cause=$cause caused_at=$cat labelled_at=$labelled handed_at=$(date -ud "@$now" +%FT%TZ) label_delay=$((l - c)) hand_delay=$((now - l))"
+                echo "| #$pr | $cause push | $cat | $((l - c)) s | $((now - l)) s |" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
+            # Pending until the `mark` job settles it, so a fixer run that
+            # errors does not count as handled.
+            gh api "repos/$GH_REPO/statuses/$sha" \
+              -f state=pending -f context=conflict-sweep \
+              -f target_url="$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID" \
+              -f description="$desc" >/dev/null \
+              || echo "::warning::PR #$pr: status not written; it may be handed over again"
+            picked+=("$pr")
+            heads+=("$pr:$sha")
+            echo "  picked #$pr at ${sha:0:8}"
+          done 3<<<"$list"
+          prs=$(jq -cn '$ARGS.positional' --args ${picked[@]+"${picked[@]}"})
+          echo "prs=$prs" >> "$GITHUB_OUTPUT"
+          echo "heads=$(jq -cn '$ARGS.positional' --args ${heads[@]+"${heads[@]}"})" >> "$GITHUB_OUTPUT"
+          echo "### Conflict sweep: ${#picked[@]} handed to the fixer ($prs)" >> "$GITHUB_STEP_SUMMARY"
+
+  # The shared workflow with `pr-number` runs only the fixer's conflict
+  # handling on that pull request: no triage, review or checks.
+  fix:
+    needs: sweep
+    if: needs.sweep.outputs.prs != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        pr: ${{ fromJSON(needs.sweep.outputs.prs) }}
+    # The permissions the shared workflow declares; a caller must grant them.
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+    uses: mark-brannan/.github/.github/workflows/claude-review.yml@main
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      AGENT_BOT_APP_ID: ${{ secrets.AGENT_BOT_APP_ID }}
+      AGENT_BOT_PRIVATE_KEY: ${{ secrets.AGENT_BOT_PRIVATE_KEY }}
+    with:
+      pr-number: ${{ matrix.pr }}
+
+  # Settles the pending status the pick wrote: `success` when the fixer ran
+  # for every picked PR, `failure` otherwise, which makes the heads eligible
+  # again. The matrix gives one combined result, so one failed leg re-arms
+  # every PR picked in this run; at MAX_NUDGES that is acceptable.
+  mark:
+    needs: [sweep, fix]
+    if: always() && needs.sweep.result == 'success' && needs.sweep.outputs.prs != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    steps:
+      - name: Settle the conflict-sweep status
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          HEADS: ${{ needs.sweep.outputs.heads }}
+          RESULT: ${{ needs.fix.result }}
+        run: |
+          set -uo pipefail
+          state=failure
+          [ "$RESULT" = success ] && state=success
+          for h in $(jq -r '.[]' <<<"$HEADS"); do
+            sha=${h#*:}
+            gh api "repos/$GH_REPO/statuses/$sha" -f state="$state" -f context=conflict-sweep \
+              -f target_url="$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID" \
+              -f description="Fixer run: $RESULT" >/dev/null \
+              || echo "::warning::${h%%:*}: status not settled"
+          done
