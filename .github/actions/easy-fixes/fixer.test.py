@@ -508,9 +508,13 @@ class Body(unittest.TestCase):
         r = Repo({"a.txt": "1\n"})
         plan = r.plan([node(1, "a.txt", 1, body_fix("Head: 9999999", "Head: 2222222")),
                        node(2, "a.txt", 1, body_fix(" ", "x")),
-                       node(3, "a.txt", 1, body_fix("a", "b"))], pr_body=self.BODY)
-        self.assertEqual([t["status"] for t in plan], ["left", "not-taken", "left"])
+                       node(3, "a.txt", 1, body_fix("x", "b")),
+                       node(4, "a.txt", 1, body_fix("Head: 111", "Head: 222")),
+                       node(5, "a.txt", 1, body_fix("## Pencil:", "## Pencil:\n- x"))],
+                      pr_body=self.BODY + "x\nx\n")
+        self.assertEqual([t["status"] for t in plan], ["left", "not-taken", "left", "left", "left"])
         self.assertIn("times, not once", plan[2]["why"])
+        self.assertIn("whole lines", plan[3]["why"])
         self.assertIsNone(r.new_body())
         plan = r.plan([node(1, "a.txt", 1, body_fix("Head: 1111111", "Head: 2222222"))])
         self.assertEqual(plan[0]["status"], "left")

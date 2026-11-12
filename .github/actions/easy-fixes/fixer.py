@@ -107,8 +107,8 @@ def body_edit(body):
 
 def apply_body(threads, text):
     """Replace each `body` thread's old text in the pull request's body, in
-    thread order. The old text must be there exactly once; otherwise the
-    thread is left. `text` None means the body could not be read. Returns the
+    thread order. The old text must be there exactly once, as whole lines
+    (part of a longer line does not count); otherwise the thread is left. `text` None means the body could not be read. Returns the
     new body, or None when nothing changed."""
     new = None if text is None else text.replace("\r\n", "\n")
     changed = False
@@ -116,16 +116,17 @@ def apply_body(threads, text):
         if t.get("status") != "body":
             continue
         old, to = t.pop("old"), t.pop("new")
-        n = 0 if new is None else new.count(old)
+        pat = re.compile(r"(?<![^\n])" + re.escape(old) + r"(?![^\n])")
+        n = 0 if new is None else len(pat.findall(new))
         if new is None:
             t.update(status="left", why="the pull request's body could not be read")
         elif n != 1:
-            t.update(status="left", why="the body-old text is not in the pull request's body" if n == 0
+            t.update(status="left", why="the body-old text is not in the pull request's body as whole lines" if n == 0
                      else f"the body-old text is in the pull request's body {n} times, not once")
         elif old == to:
             t.update(status="left", why="the body already reads as the body-new text")
         else:
-            new = new.replace(old, to)
+            new = pat.sub(lambda _: to, new, count=1)
             changed = True
     return new if changed else None
 
