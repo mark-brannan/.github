@@ -104,3 +104,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261111t175417z
 - Conflict sweep: wakes on Has Conflict instead of dequeued; push to main kept as retry; Mergify rule labels drafts too; delay measured from the later base or branch update before the label Undo: restore the dequeued trigger, drop push-to-main, add -draft to the Mergify rule ([#124](https://github.com/mark-brannan/.github/pull/124))
+
+### 20261112t030830z
+- Body-fix fences are named body-old and body-new A CRLF PR body is saved with LF line ends after a fixer edit The fixer saves the PR body in the plan step, before the agent runs A fixer-authored head takes no body pairs either Undo: rename in BODY_FENCE and the critical-review skill; revert the PR ([#126](https://github.com/mark-brannan/.github/pull/126))
