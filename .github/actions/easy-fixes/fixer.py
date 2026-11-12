@@ -16,8 +16,9 @@ where the tests reach it.
           the agent found it, suggestion fixes and all; the kept
           files become
           createCommitOnBranch additions
-  report  the commit's sha (or why there is none) -> one reply per thread and
-          the roll-up for the job summary
+  report  the commit's sha (or why there is none) -> one reply per thread,
+          which threads to resolve (the fixed ones) and the roll-up for the
+          job summary
 
 When the branch conflicts with its base, the job merges the base in first and
 these decide whether a small model may resolve what git left:
@@ -375,7 +376,8 @@ def gate(threads, agent, root, moved=()):
 
 def report(threads, sha, failure, sign, note="", body_failure=""):
     """One reply per thread and the roll-up. A fix without a commit is `left`;
-    so is a body edit that was not saved."""
+    so is a body edit that was not saved. A fixed thread is marked to be
+    resolved; every other one stays open for the author."""
     replies = []
     for t in threads:
         if t["status"] == "body":
@@ -395,7 +397,8 @@ def report(threads, sha, failure, sign, note="", body_failure=""):
             text = f"🤖 Left for the author: {t.get('why') or 'not attempted'}."
         if note:
             text += f"\n\n{note}"
-        replies.append({"comment_id": t["comment_id"], "body": f"{text}\n\n{sign}"})
+        replies.append({"comment_id": t["comment_id"], "body": f"{text}\n\n{sign}",
+                        "thread_id": t["thread_id"], "resolve": t["status"] == "fixed"})
     counts = {k: sum(t["status"] == k for t in threads) for k in ("fixed", "not-taken", "left")}
     md = ["### Claude fixer", "",
           f"fixed {counts['fixed']}, not taken {counts['not-taken']}, left {counts['left']}"

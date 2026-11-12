@@ -2021,7 +2021,8 @@ jobs:
   # any other (a workflow needs the agent App to hold `workflows`). The commit is made
   # through the API with the agent App's token, so GitHub signs it; nothing is
   # pushed from the runner. Each thread gets one reply, with the sha or why
-  # not; none is resolved, that stays the author's. A branch that is behind
+  # not. A thread the fixer fixed is then resolved, as the agent App; one it
+  # declined stays open for the author. A branch that is behind
   # its base is brought up to date first, so the fix commit is the last push
   # and its checks are not cancelled by a merge landing after it.
   #
@@ -2686,6 +2687,7 @@ jobs:
           FAILURE: ${{ steps.commit.outputs.failure || 'the commit step did not finish' }}
           NOTE: ${{ steps.update.outputs.note }}
           BODY_FAILURE: ${{ steps.plan.outputs.body-failure }}
+          APP_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           set -euo pipefail
           printf '%s  %s\n' "$SCRIPT_SHA" "$SCRIPT" | sha256sum -c --quiet
@@ -2698,7 +2700,14 @@ jobs:
           jq -c '.replies[]' "$FIXER_DIR/report.json" | while IFS= read -r r; do
             id=$(jq -r .comment_id <<<"$r")
             jq -r .body <<<"$r" | gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/comments/$id/replies" -F body=@- >/dev/null \
-              || echo "::warning::could not reply on review comment $id"
+              || { echo "::warning::could not reply on review comment $id"; continue; }
+            # A fixed thread needs no one's eye: resolved once its reply is
+            # up, with the App's token, so the resolve is the agent's.
+            if [ "$(jq -r .resolve <<<"$r")" = true ] && [ -n "${APP_TOKEN:-}" ]; then
+              GH_TOKEN=$APP_TOKEN gh api graphql -F id="$(jq -r .thread_id <<<"$r")" \
+                -f query='mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }' >/dev/null \
+                || echo "::warning::could not resolve the thread of review comment $id"
+            fi
           done
 
       # One signed comment on the conflict, from the merge step's sorting or

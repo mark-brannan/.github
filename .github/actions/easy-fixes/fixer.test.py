@@ -535,6 +535,7 @@ class Body(unittest.TestCase):
         rep = r.run("report", "--gate", r.tmp("gate.json"), "--body-failure", "GitHub refused the edit", "--sign", SIGN)
         self.assertEqual(rep["counts"], {"fixed": 0, "not-taken": 0, "left": 1})
         self.assertIn("GitHub refused the edit", rep["replies"][0]["body"])
+        self.assertFalse(rep["replies"][0]["resolve"])
 
 
 class Report(unittest.TestCase):
@@ -550,6 +551,8 @@ class Report(unittest.TestCase):
         res = r.run("report", "--gate", r.tmp("gate.json"), "--sha", "abc1234", "--sign", SIGN)
         self.assertEqual(res["counts"]["fixed"], 1)
         self.assertIn("abc1234", res["replies"][0]["body"])
+        # Only a fixed thread is resolved; a declined one stays open.
+        self.assertEqual([(x["thread_id"], x["resolve"]) for x in res["replies"]], [("T1", True), ("T2", False)])
 
 
 if __name__ == "__main__":
