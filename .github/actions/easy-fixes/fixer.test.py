@@ -29,6 +29,10 @@ def node(i, path, line, body, start=None, login="claude", commit=HEAD, total=1,
                 "body": body, "originalCommit": {"oid": commit}}]}}
 
 
+def body_fix(old, new):
+    return f"🤖 [nit] [easy] the body is stale\n```body-old\n{old}\n```\n```body-new\n{new}\n```\n🤖 claude-sonnet-5-5 · medium · 1a2b3c4d"
+
+
 def fence(text):
     return f"🤖 [nit] [easy] fix it\n```suggestion\n{text}```\n🤖 claude-sonnet-5-5 · medium · 1a2b3c4d"
 
@@ -61,16 +65,24 @@ class Repo:
     def tmp(self, name):
         return str(Path(self.root, "..", name).resolve())
 
-    def plan(self, nodes, head_message=None):
+    def plan(self, nodes, head_message=None, pr_body=None):
         Path(self.tmp("threads.json")).write_text(json.dumps(nodes))
         extra = []
+        Path(self.tmp("body-out.md")).unlink(missing_ok=True)
+        if pr_body is not None:
+            Path(self.tmp("body.md")).write_bytes(pr_body.encode())
+            extra = ["--pr-body", self.tmp("body.md"), "--body-out", self.tmp("body-out.md")]
         if head_message is not None:
             Path(self.tmp("msg.txt")).write_text(head_message)
-            extra = ["--head-message", self.tmp("msg.txt")]
+            extra += ["--head-message", self.tmp("msg.txt")]
         res = self.run("plan", "--threads", self.tmp("threads.json"), "--head", HEAD, "--root", self.root,
                        *extra)
         Path(self.tmp("plan.json")).write_text(json.dumps(res))
         return res
+
+    def new_body(self):
+        f = Path(self.tmp("body-out.md"))
+        return f.read_text() if f.exists() else None
 
     def gate(self, agent):
         Path(self.tmp("agent.json")).write_text(json.dumps(agent))
@@ -474,6 +486,51 @@ class ConflictWorkflow(unittest.TestCase):
         fixer = wf[wf.index("  fixer:\n"):]
         self.assertNotIn("rebase", fixer.replace("never a rebase", ""))
         self.assertIn("-F force=false", fixer)
+
+
+class Body(unittest.TestCase):
+    BODY = "Adds a thing.\r\n\r\nHead: 1111111\r\n\r\n## Pencil: none\r\n"
+
+    def test_the_old_text_is_replaced_and_no_file_changes(self):
+        r = Repo({"a.txt": "1\n"})
+        plan = r.plan([node(1, "a.txt", 1, body_fix("Head: 1111111", "Head: 2222222")),
+                       node(2, "a.txt", 1, body_fix("## Pencil: none", "## Pencil:\n- kept the old name"))],
+                      pr_body=self.BODY)
+        self.assertEqual([t["status"] for t in plan], ["body", "body"])
+        self.assertEqual(r.new_body(), "Adds a thing.\n\nHead: 2222222\n\n## Pencil:\n- kept the old name\n")
+        res = r.gate([])
+        self.assertEqual(res["additions"], [])
+        rep = r.run("report", "--gate", r.tmp("gate.json"), "--sha", "", "--failure", "nothing to commit", "--sign", SIGN)
+        self.assertEqual(rep["counts"], {"fixed": 2, "not-taken": 0, "left": 0})
+        self.assertIn("pull request's body", rep["replies"][0]["body"])
+
+    def test_text_absent_repeated_or_unreadable_is_left_and_the_body_stays(self):
+        r = Repo({"a.txt": "1\n"})
+        plan = r.plan([node(1, "a.txt", 1, body_fix("Head: 9999999", "Head: 2222222")),
+                       node(2, "a.txt", 1, body_fix(" ", "x")),
+                       node(3, "a.txt", 1, body_fix("a", "b"))], pr_body=self.BODY)
+        self.assertEqual([t["status"] for t in plan], ["left", "not-taken", "left"])
+        self.assertIn("times, not once", plan[2]["why"])
+        self.assertIsNone(r.new_body())
+        plan = r.plan([node(1, "a.txt", 1, body_fix("Head: 1111111", "Head: 2222222"))])
+        self.assertEqual(plan[0]["status"], "left")
+
+    def test_half_a_pair_or_a_suggestion_beside_it_is_not_taken(self):
+        r = Repo({"a.txt": "1\n"})
+        half = "🤖 [nit] [easy] x\n```body-new\nHead: 2\n```\n"
+        both = body_fix("Head: 1111111", "Head: 2") + "\n```suggestion\nA\n```\n"
+        plan = r.plan([node(1, "a.txt", 1, half), node(2, "a.txt", 1, both)], pr_body=self.BODY)
+        self.assertEqual([t["status"] for t in plan], ["not-taken", "not-taken"])
+        self.assertEqual(r.read("a.txt"), "1\n")
+        self.assertIsNone(r.new_body())
+
+    def test_a_body_that_was_not_saved_is_left(self):
+        r = Repo({"a.txt": "1\n"})
+        r.plan([node(1, "a.txt", 1, body_fix("Head: 1111111", "Head: 2222222"))], pr_body=self.BODY)
+        r.gate([])
+        rep = r.run("report", "--gate", r.tmp("gate.json"), "--body-failure", "GitHub refused the edit", "--sign", SIGN)
+        self.assertEqual(rep["counts"], {"fixed": 0, "not-taken": 0, "left": 1})
+        self.assertIn("GitHub refused the edit", rep["replies"][0]["body"])
 
 
 class Report(unittest.TestCase):

@@ -2013,7 +2013,9 @@ jobs:
 
   # The review's [easy] findings, fixed and committed in one go. It reads only
   # this head's open claude[bot] threads tagged [easy] (critical-review's
-  # "Easy." paragraph): a ```suggestion fence is applied by script, the rest go
+  # "Easy." paragraph): a ```suggestion fence is applied by script, a
+  # ```body-old / ```body-new pair replaces that exact text in the pull
+  # request's body by script, the rest go
   # to a small model allowed to edit only the files those threads name. No path
   # is off limits by its name: a hook, a workflow or a config is fixed like
   # any other (a workflow needs the agent App to hold `workflows`). The commit is made
@@ -2360,10 +2362,22 @@ jobs:
                         nodes { databaseId url body author { login __typename } originalCommit { oid } } } } } } } }' \
             --jq '.data.repository.pullRequest.reviewThreads.nodes' > "$FIXER_DIR/threads.json"
           git log -1 --format=%B "$HEAD_SHA" > "$FIXER_DIR/head-message.txt"
+          # An unreadable body leaves its file missing, and the plan leaves
+          # every body thread for the author.
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.body // ""' > "$FIXER_DIR/pr-body.md" \
+            || rm -f "$FIXER_DIR/pr-body.md"
           python3 "$SCRIPT" plan \
             --threads "$FIXER_DIR/threads.json" --head "$HEAD_SHA" --root . \
             --head-message "$FIXER_DIR/head-message.txt" --moved "$FIXER_DIR/merge-moved.txt" \
+            --pr-body "$FIXER_DIR/pr-body.md" --body-out "$FIXER_DIR/pr-body.new.md" \
             --out "$FIXER_DIR/plan.json"
+          # A body-old/body-new pair is the reviewer's exact text, replaced by
+          # the script and saved here, before the agent starts: no model
+          # writes the body.
+          if [ -f "$FIXER_DIR/pr-body.new.md" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$PR" -F body=@"$FIXER_DIR/pr-body.new.md" >/dev/null \
+              || { echo "body-failure=GitHub refused the edit" >> "$GITHUB_OUTPUT"; echo "::warning::could not save the pull request's body"; }
+          fi
           # Step outputs are out of the agent's reach: the steps after it check
           # the script and the plan against these before running either.
           echo "script-sha=$(sha256sum "$SCRIPT" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
@@ -2671,6 +2685,7 @@ jobs:
           SHA: ${{ steps.commit.outputs.sha }}
           FAILURE: ${{ steps.commit.outputs.failure || 'the commit step did not finish' }}
           NOTE: ${{ steps.update.outputs.note }}
+          BODY_FAILURE: ${{ steps.plan.outputs.body-failure }}
         run: |
           set -euo pipefail
           printf '%s  %s\n' "$SCRIPT_SHA" "$SCRIPT" | sha256sum -c --quiet
@@ -2678,7 +2693,7 @@ jobs:
           # reported from the plan.
           [ -f "$FIXER_DIR/gate.json" ] || jq '{threads: ., additions: [], reverted: []}' "$FIXER_DIR/plan.json" > "$FIXER_DIR/gate.json"
           python3 "$SCRIPT" report --gate "$FIXER_DIR/gate.json" --sha "${SHA:-}" --failure "$FAILURE" \
-            --note "${NOTE:-}" --sign "🤖 claude-fixer · $FIXER_MODEL · low · run $GITHUB_RUN_ID" --out "$FIXER_DIR/report.json"
+            --note "${NOTE:-}" --body-failure "${BODY_FAILURE:-}" --sign "🤖 claude-fixer · $FIXER_MODEL · low · run $GITHUB_RUN_ID" --out "$FIXER_DIR/report.json"
           jq -r '.summary' "$FIXER_DIR/report.json" >> "$GITHUB_STEP_SUMMARY"
           jq -c '.replies[]' "$FIXER_DIR/report.json" | while IFS= read -r r; do
             id=$(jq -r .comment_id <<<"$r")
