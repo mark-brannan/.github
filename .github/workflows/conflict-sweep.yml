@@ -39,8 +39,9 @@ name: Conflict sweep
 # Each hand-over records how long the conflict waited, so the delay can be
 # read later from GitHub alone, on any machine: the pending `conflict-sweep`
 # status on the head (statuses are kept for good) and a `conflict-latency`
-# notice on the run carry the push that caused the conflict (the later of the
-# last push to the base or to the branch) and the hand-over time.
+# last push to the base or to the branch) and the hand-over time. The base's
+# last push is the one that woke this run: a conflict an earlier run left as
+# UNKNOWN is older than that, so its delay under-reads.
 # .github/scripts/conflict_latency.py reads the notices back across repos.
 #
 # A caller grants every scope the jobs below ask for; a called job that asks
@@ -140,7 +141,7 @@ jobs:
             exit 0
           fi
           # A failed listing is a failed job, never an empty list.
-          if ! list=$(gh pr list --state open --draft=false --limit 100 \
+          if ! list=$(gh pr list --state open --draft=false --limit 500 \
                         --search '-label:"fixer:skip"' \
                         --json number,isCrossRepository,mergeable,headRefOid,baseRefName,headRefName \
                         --jq '.[] | select(.isCrossRepository | not) | [.number, .mergeable, .headRefOid, .baseRefName, .headRefName] | @tsv'); then
