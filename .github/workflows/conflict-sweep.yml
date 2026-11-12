@@ -38,7 +38,8 @@ name: Conflict sweep
 # status on the head (statuses are kept for good) and a `conflict-latency`
 # notice on the run carry the push that caused the conflict (the later of the
 # last push to the base or to the branch before the label), the label time
-# and the hand-over time.
+# and the hand-over time. .github/scripts/conflict_latency.py reads the notices
+# back across repos.
 #
 # A caller grants every scope the jobs below ask for; a called job that asks
 # for more than its caller allows fails at startup:

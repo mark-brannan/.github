@@ -154,10 +154,19 @@ jobs:
           persist-credentials: false
       - run: python3 .github/scripts/review_metrics.test.py
 
+  # The conflict-latency reader; parsing only, no network; seconds.
+  conflict-latency-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: python3 .github/scripts/conflict_latency.test.py
+
   # The single required status check. `always()` lets it evaluate when a
   # dependency failed or was skipped instead of inheriting the skip.
   ci-gate:
-    needs: [nonempty, pr-title, secret-scan, complexity-tests, coverage-tests, headless-run-cost-tests, easy-fixes-tests, duplication-tests, golden-diff-tests, show-dont-tell-tests, review-metrics-tests]
+    needs: [nonempty, pr-title, secret-scan, complexity-tests, coverage-tests, headless-run-cost-tests, easy-fixes-tests, duplication-tests, golden-diff-tests, show-dont-tell-tests, review-metrics-tests, conflict-latency-tests]
     if: always()
     permissions: {}
     uses: ./.github/workflows/ci-gate.yml
