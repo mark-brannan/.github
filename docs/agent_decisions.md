@@ -110,3 +110,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261112t035947z
 - Removed the Mergify Has Conflict toggle rule outright; existing labels stay inert Undo: restore the .mergify.yml rule ([#128](https://github.com/mark-brannan/.github/pull/128))
+
+### 20261112t035951z
+- Older two-part latency notices are read as their sum Undo: drop the sum fallback in parse_notice ([#128](https://github.com/mark-brannan/.github/pull/128))
