@@ -107,3 +107,6 @@ heading is the UTC stamp, so `agent_decisions.md#<stamp>` links one entry.
 
 ### 20261112t030830z
 - Body-fix fences are named body-old and body-new A CRLF PR body is saved with LF line ends after a fixer edit The fixer saves the PR body in the plan step, before the agent runs A fixer-authored head takes no body pairs either Undo: rename in BODY_FENCE and the critical-review skill; revert the PR ([#126](https://github.com/mark-brannan/.github/pull/126))
+
+### 20261112t035947z
+- Removed the Mergify Has Conflict toggle rule outright; existing labels stay inert Undo: restore the .mergify.yml rule ([#128](https://github.com/mark-brannan/.github/pull/128))
