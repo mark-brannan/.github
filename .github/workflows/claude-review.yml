@@ -2372,13 +2372,6 @@ jobs:
             --head-message "$FIXER_DIR/head-message.txt" --moved "$FIXER_DIR/merge-moved.txt" \
             --pr-body "$FIXER_DIR/pr-body.md" --body-out "$FIXER_DIR/pr-body.new.md" \
             --out "$FIXER_DIR/plan.json"
-          # A body-old/body-new pair is the reviewer's exact text, replaced by
-          # the script and saved here, before the agent starts: no model
-          # writes the body.
-          if [ -f "$FIXER_DIR/pr-body.new.md" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$PR" -F body=@"$FIXER_DIR/pr-body.new.md" >/dev/null \
-              || { echo "body-failure=GitHub refused the edit" >> "$GITHUB_OUTPUT"; echo "::warning::could not save the pull request's body"; }
-          fi
           # Step outputs are out of the agent's reach: the steps after it check
           # the script and the plan against these before running either.
           echo "script-sha=$(sha256sum "$SCRIPT" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
@@ -2393,6 +2386,13 @@ jobs:
           tools=$(jq -r --arg ans "$FIXER_DIR/agent.json" \
             '[.[] | .path // empty | "Edit(/\(.))"] + ["Edit(/\($ans))"] | unique | join(",")' "$FIXER_DIR/tasks.json")
           echo "edit-tools=$tools" >> "$GITHUB_OUTPUT"
+          # A body-old/body-new pair is the reviewer's exact text, replaced by
+          # the script and saved last in this step, before the agent starts: no model
+          # writes the body.
+          if [ -f "$FIXER_DIR/pr-body.new.md" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$PR" -F body=@"$FIXER_DIR/pr-body.new.md" >/dev/null \
+              || { echo "body-failure=GitHub refused the edit" >> "$GITHUB_OUTPUT"; echo "::warning::could not save the pull request's body"; }
+          fi
 
       # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB needs bubblewrap, which the runner lacks.
       # Same install the action does itself for allowed_non_write_users.
