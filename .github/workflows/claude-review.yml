@@ -748,7 +748,7 @@ jobs:
         if: steps.gate.outputs.substance == 'true'
         continue-on-error: true
         timeout-minutes: 5
-        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
+        uses: anthropics/claude-code-action@9eb012b6d0900c2b9eede65ee1758cec4d2973e9 # v1.0.270
         # The env scrub, as in the review step.
         env:
           CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
@@ -1263,7 +1263,7 @@ jobs:
       # enables it, but enabling installs nothing: a headless run on a bare
       # runner has no plugin cache, so the action installs it here.
       - id: review
-        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
+        uses: anthropics/claude-code-action@9eb012b6d0900c2b9eede65ee1758cec4d2973e9 # v1.0.270
         # Strip the Anthropic and cloud credentials from every shell the
         # agent starts, so no Bash call finds the OAuth token in the shell's
         # own environment. The action turns this on only for
@@ -1495,7 +1495,7 @@ jobs:
       # the other.
       - id: maxims
         timeout-minutes: 5
-        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
+        uses: anthropics/claude-code-action@9eb012b6d0900c2b9eede65ee1758cec4d2973e9 # v1.0.270
         # Strip the Anthropic and cloud credentials from every shell the
         # agent starts, so no Bash call finds the OAuth token in the shell's
         # own environment. The action turns this on only for
@@ -1584,7 +1584,7 @@ jobs:
       - if: "!cancelled()"
         id: arete
         timeout-minutes: 5
-        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
+        uses: anthropics/claude-code-action@9eb012b6d0900c2b9eede65ee1758cec4d2973e9 # v1.0.270
         # Strip the Anthropic and cloud credentials from every shell the
         # agent starts, so no Bash call finds the OAuth token in the shell's
         # own environment. The action turns this on only for
@@ -2243,7 +2243,7 @@ jobs:
       - if: steps.merge.outputs.status == 'resolve'
         id: conflict-agent
         continue-on-error: true
-        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
+        uses: anthropics/claude-code-action@9eb012b6d0900c2b9eede65ee1758cec4d2973e9 # v1.0.270
         env:
           CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
         with:
@@ -2406,7 +2406,7 @@ jobs:
 
       - if: steps.plan.outputs.tasks > 0
         id: agent
-        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
+        uses: anthropics/claude-code-action@9eb012b6d0900c2b9eede65ee1758cec4d2973e9 # v1.0.270
         # Strip the Anthropic and cloud credentials from every shell the
         # agent starts, so no Bash call finds the OAuth token in the shell's
         # own environment. The action turns this on only for
