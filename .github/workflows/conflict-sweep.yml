@@ -186,7 +186,7 @@ jobs:
             # How long Mergify took: the label time against the push that
             # caused the conflict, the later of the base's and the branch's.
             now=$(date -u +%s)
-            labelled=$(gh api "repos/$GH_REPO/issues/$pr/events" --paginate \
+            labelled=$(gh api "repos/$GH_REPO/issues/$pr/events?per_page=100" --paginate \
                          --jq ".[] | select(.event == \"labeled\" and .label.name == \"$CONFLICT_LABEL\") | .created_at" \
                          2>/dev/null | tail -1)
             desc="Handed to the fixer"
