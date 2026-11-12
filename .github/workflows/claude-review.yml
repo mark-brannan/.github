@@ -2364,7 +2364,7 @@ jobs:
           git log -1 --format=%B "$HEAD_SHA" > "$FIXER_DIR/head-message.txt"
           # An unreadable body leaves its file missing, and the plan leaves
           # every body thread for the author.
-          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.body // ""' > "$FIXER_DIR/pr-body.md" \
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" | jq -j '.body // ""' > "$FIXER_DIR/pr-body.md" \
             || rm -f "$FIXER_DIR/pr-body.md"
           python3 "$SCRIPT" plan \
             --threads "$FIXER_DIR/threads.json" --head "$HEAD_SHA" --root . \
