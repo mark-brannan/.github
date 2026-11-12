@@ -6,8 +6,9 @@ where the tests reach it.
 
   plan    the review threads (GraphQL nodes) -> this head's open [easy] threads,
           suggestion fences applied to the checkout and
-          the agent's line numbers moved past them; nothing on a head the
-          fixer itself committed
+          the agent's line numbers moved past them; a body-old/body-new
+          fence pair replaced in the pull request's body text; nothing on
+          a head the fixer itself committed
   gate    after the agent: every changed tracked path named by a
           taken thread is kept (unless the base branch changed it since the
           review), every other one reverted; a file the agent
@@ -15,8 +16,9 @@ where the tests reach it.
           the agent found it, suggestion fixes and all; the kept
           files become
           createCommitOnBranch additions
-  report  the commit's sha (or why there is none) -> one reply per thread and
-          the roll-up for the job summary
+  report  the commit's sha (or why there is none) -> one reply per thread,
+          which threads to resolve (the fixed ones) and the roll-up for the
+          job summary
 
 When the branch conflicts with its base, the job merges the base in first and
 these decide whether a small model may resolve what git left:
@@ -46,6 +48,9 @@ from pathlib import Path
 
 EASY = re.compile(r"^\s*(?:🤖\s*)?\[(?:nit|should)\]\s*\[easy\]")
 FENCE = re.compile(r"^```suggestion[ \t]*\r?\n(.*?)^```[ \t]*\r?$", re.S | re.M)
+# A fix to the pull request's body: the reviewer gives the exact text there
+# now and the text to put in its place. No model writes the body.
+BODY_FENCE = re.compile(r"^```body-(old|new)[ \t]*\r?\n(.*?)^```[ \t]*\r?$", re.S | re.M)
 BOT_LOGINS = {"claude", "claude[bot]"}
 # Every fixer commit carries this trailer, and a head that does is not fixed
 # again: the fixer never answers its own commit.
@@ -82,6 +87,49 @@ def path_problem(root, path):
 
 def suggestions(body):
     return [m.group(1) for m in FENCE.finditer(body)]
+
+
+def body_edit(body):
+    """(old, new) from a thread's body-old/body-new fences, None when it has
+    neither, or a string saying why the pair cannot be used."""
+    found = [(m.group(1), m.group(2).replace("\r\n", "\n").rstrip("\n"))
+             for m in BODY_FENCE.finditer(body)]
+    if not found:
+        return None
+    if sorted(k for k, _ in found) != ["new", "old"]:
+        return "a body edit needs one body-old fence and one body-new fence"
+    pair = dict(found)
+    if not pair["old"].strip():
+        return "the body-old fence is empty, so there is nothing to find in the body"
+    if suggestions(body):
+        return "a body edit and a suggestion in one thread"
+    return pair["old"], pair["new"]
+
+
+def apply_body(threads, text):
+    """Replace each `body` thread's old text in the pull request's body, in
+    thread order. The old text must be there exactly once, as whole lines
+    (part of a longer line does not count); otherwise the thread is left. `text` None means the body could not be read. Returns the
+    new body, or None when nothing changed."""
+    new = None if text is None else text.replace("\r\n", "\n")
+    changed = False
+    for t in threads:
+        if t.get("status") != "body":
+            continue
+        old, to = t.pop("old"), t.pop("new")
+        pat = re.compile(r"(?<![^\n])" + re.escape(old) + r"(?![^\n])")
+        n = 0 if new is None else len(pat.findall(new))
+        if new is None:
+            t.update(status="left", why="the pull request's body could not be read")
+        elif n != 1:
+            t.update(status="left", why="the body-old text is not in the pull request's body as whole lines" if n == 0
+                     else f"the body-old text is in the pull request's body {n} times, not once")
+        elif old == to:
+            t.update(status="left", why="the body already reads as the body-new text")
+        else:
+            new = pat.sub(lambda _: to, new, count=1)
+            changed = True
+    return new if changed else None
 
 
 def easy_threads(nodes, head):
@@ -202,8 +250,13 @@ def plan(nodes, head, root, head_message="", moved=()):
     for t in threads:
         fences = suggestions(t["body"])
         path = t["path"]
+        edit = body_edit(t["body"])
         problem = path_problem(root, path) if path else None
-        if problem:
+        if isinstance(edit, str):
+            t.update(status="not-taken", why=edit)
+        elif edit:
+            t.update(status="body", old=edit[0], new=edit[1])
+        elif problem:
             t.update(status="not-taken", why=problem)
         elif path in moved:
             t.update(status="not-taken", why="the merge with the base changed this file, so the review's lines may not hold")
@@ -321,13 +374,22 @@ def gate(threads, agent, root, moved=()):
             "reverted": [{"path": p, "why": w} for p, w in reverted.items()]}
 
 
-def report(threads, sha, failure, sign, note=""):
-    """One reply per thread and the roll-up. A fix without a commit is `left`."""
+def report(threads, sha, failure, sign, note="", body_failure=""):
+    """One reply per thread and the roll-up. A fix without a commit is `left`;
+    so is a body edit that was not saved. A fixed thread is marked to be
+    resolved; every other one stays open for the author."""
     replies = []
     for t in threads:
-        if t["status"] == "fixed" and not sha:
+        if t["status"] == "body":
+            if body_failure:
+                t.update(status="left", why=f"the pull request's body was not saved: {body_failure}")
+            else:
+                t.update(status="fixed", how="body")
+        elif t["status"] == "fixed" and not sha:
             t.update(status="left", why=f"fixed in the runner but not committed: {failure or 'no commit'}")
-        if t["status"] == "fixed":
+        if t["status"] == "fixed" and t.get("how") == "body":
+            text = "🤖 Fixed in the pull request's body (the body-old text replaced by the body-new text)."
+        elif t["status"] == "fixed":
             text = f"🤖 Fixed in {sha} ({'suggestion applied' if t.get('how') == 'suggestion' else 'agent edit'})."
         elif t["status"] == "not-taken":
             text = f"🤖 Not taken by the fixer: {t['why']}."
@@ -335,7 +397,8 @@ def report(threads, sha, failure, sign, note=""):
             text = f"🤖 Left for the author: {t.get('why') or 'not attempted'}."
         if note:
             text += f"\n\n{note}"
-        replies.append({"comment_id": t["comment_id"], "body": f"{text}\n\n{sign}"})
+        replies.append({"comment_id": t["comment_id"], "body": f"{text}\n\n{sign}",
+                        "thread_id": t["thread_id"], "resolve": t["status"] == "fixed"})
     counts = {k: sum(t["status"] == k for t in threads) for k in ("fixed", "not-taken", "left")}
     md = ["### Claude fixer", "",
           f"fixed {counts['fixed']}, not taken {counts['not-taken']}, left {counts['left']}"
@@ -558,6 +621,8 @@ def main(argv=None):
     p.add_argument("--root", default=".")
     p.add_argument("--head-message", default="", help="file holding the head commit's message")
     p.add_argument("--moved", help="file of paths (one per line) a merge with the base changed")
+    p.add_argument("--pr-body", help="file holding the pull request's body")
+    p.add_argument("--body-out", help="where to write the body after the body edits; not written when none applied")
     p.add_argument("--out", required=True)
     g = sub.add_parser("gate")
     g.add_argument("--plan", required=True)
@@ -570,6 +635,7 @@ def main(argv=None):
     r.add_argument("--sha", default="")
     r.add_argument("--failure", default="")
     r.add_argument("--note", default="")
+    r.add_argument("--body-failure", default="", help="why the edited body was not saved")
     r.add_argument("--sign", required=True)
     r.add_argument("--out", required=True)
     c = sub.add_parser("conflicts")
@@ -617,6 +683,13 @@ def main(argv=None):
         except OSError:
             moved = set()
         res = plan(nodes, a.head, a.root, msg, moved)
+        try:
+            pr_body = Path(a.pr_body).read_text() if a.pr_body else None
+        except OSError:
+            pr_body = None
+        new_body = apply_body(res, pr_body)
+        if new_body is not None and a.body_out:
+            Path(a.body_out).write_text(new_body)
     elif a.cmd == "gate":
         try:
             agent = json.loads(Path(a.agent).read_text())
@@ -629,7 +702,7 @@ def main(argv=None):
         res = gate(json.loads(Path(a.plan).read_text()), agent if isinstance(agent, list) else [], a.root, moved)
     else:
         doc = json.loads(Path(a.gate).read_text())
-        res = report(doc["threads"], a.sha, a.failure, a.sign, a.note)
+        res = report(doc["threads"], a.sha, a.failure, a.sign, a.note, a.body_failure)
     Path(a.out).write_text(json.dumps(res, ensure_ascii=False, indent=1))
     return 0
 
