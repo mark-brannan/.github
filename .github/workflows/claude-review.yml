@@ -1393,9 +1393,10 @@ jobs:
 
       # The summary's one post path, checked (mark-brannan/.github#96): no
       # summary from the bot fails the job, with each refusal of a `gh pr
-      # comment` call from the session as the reason. A guard-private-terms
-      # refusal quotes the term it matched, so its line names the guard and
-      # withholds the rest; the call's input, which holds the body, is never
+      # comment` call from the session as the reason. A refusal's own text can
+      # quote what it matched, and this log is public, so a line names the
+      # guard when it is guard-private-terms and otherwise says only that a
+      # reason was withheld; the call's input, which holds the body, is never
       # printed. A refusal followed by a rewritten post that landed is a
       # notice: the guard worked as designed.
       - name: Confirm the summary landed through the guards
@@ -1415,7 +1416,7 @@ jobs:
                 | (.content | if type == "array" then map(.text? // "") | join(" ") else tostring end) as $why
                 | if ($why | test("private-terms|blocked term|private detail"; "i"))
                   then "gh pr comment refused by guard-private-terms: the body held a term on its list (the term is withheld from this public log)"
-                  else "gh pr comment refused: " + ($why | gsub("\\s+"; " ") | .[0:300]) end ),
+                  else "gh pr comment refused (reason withheld from this public log)" end ),
               ( .[] | select(.type == "result") | .permission_denials[]?
                 | select(.tool_name == "Bash" and ((.tool_input.command // "") | test("gh +pr +comment")))
                 | "gh pr comment refused: it needed a permission nobody can grant in CI" )
@@ -2104,7 +2105,7 @@ jobs:
   # or fails the gate, goes back to the author in one signed comment with the
   # branch as it was. The merge is pushed as the App, signed, before the easy
   # fixes, which then land on the merged tree. That part runs behind any
-  # triage that passed, whether the review then ran, posted or was skipped;
+  # triage that passed, whether the review then ran, posted, failed or was skipped;
   # the fixes still need a review this run posted. A conflict that appears
   # later, when the base moves, waits for the next pull_request event.
   # With the `pr-number` input it need not wait: a caller started by
@@ -2112,7 +2113,7 @@ jobs:
   # handling runs on it (see the `target` step).
   fixer:
     needs: [triage, review]
-    if: always() && (inputs.pr-number != '' || (needs.triage.result == 'success' && (needs.review.result == 'success' || needs.review.result == 'skipped')))
+    if: always() && (inputs.pr-number != '' || (needs.triage.result == 'success' && needs.review.result != 'cancelled'))
     runs-on: ubuntu-latest
     timeout-minutes: 15  # stand-in until three runs are measured
     concurrency:
