@@ -114,6 +114,13 @@ with:
             f = rm.parse_log(log)
             self.assertEqual((f["model"], f["cost"], f["effort"], f["tier"]), ("claude-opus-5-5", 0.9, "high", "deep"))
 
+    def test_the_review_is_the_invocation_that_sets_display_report_since_track_progress_went(self):
+        review = self.invocation("claude-opus-5-5", "high", 0.9, False).replace(
+            "with:\n", "with:\n  display_report: false\n")
+        checks = self.invocation("claude-sonnet-5-5", "medium", 0.35, False)
+        f = rm.parse_log(stamped("\n".join([checks, review])))
+        self.assertEqual((f["model"], f["cost"], f["effort"]), ("claude-opus-5-5", 0.9, "high"))
+
     @staticmethod
     def invocation(model, effort, cost, track):
         return '''##[group]Run anthropics/claude-code-action@d535f51

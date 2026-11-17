@@ -36,6 +36,12 @@ name: Claude PR Review
 #                    recommendation; "not yet" holds the pull request and puts
 #                    the brief's line findings on their lines as comments.
 #
+# The review posts its summary one way: a `gh pr comment`, screened by the
+# seeded guards (mark-brannan/.github#96). A post the guards refuse, or a
+# review whose guards did not load, ends the review job red with the reason
+# in the log; nothing publishes the summary by another route. The reason
+# names the guard, never the text it matched, because this log is public.
+#
 # Neither check's full report is ever public: each goes to the private state
 # repository (mark-brannan/claude_prompts_scratch, under
 # state/global/review-metrics/reports/), pushed by a plain step with a token
@@ -1272,7 +1278,18 @@ jobs:
           CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          track_progress: true
+          # No track_progress: it forces tag mode, whose tracking comment
+          # takes the agent's last message and whose comment tool posts
+          # outside the guards, a second publish path (mark-brannan/.github#96).
+          # A prompt on a pull_request event runs agent mode, which has
+          # neither.
+          #
+          # display_report false, its default, set here on purpose: the job
+          # summary is public too, so it is not a place for the agent's text.
+          # It also marks this invocation as the review's in the job log for
+          # .github/scripts/review_metrics.py, as track_progress did; no
+          # other invocation in this workflow may set it.
+          display_report: false
           allowed_bots: mergify[bot],mark-brannan-release-please[bot],claude[bot],mark-brannan-agent[bot],${{ inputs.allowed-bots }}
           plugin_marketplaces: ${{ inputs.seed-home && 'https://github.com/mark-brannan/languette.git' || '' }}
           plugins: ${{ inputs.seed-home && 'languette@languette' || '' }}
@@ -1282,6 +1299,14 @@ jobs:
             HOME SEEDING: ${{ steps.seed.outputs.note }}
 
             ${{ steps.brief.outputs.text }}
+
+            The summary has one way onto the pull request: the `gh pr
+            comment` above. If a guard or a permission refuses it, you may
+            rewrite the body as the refusal asks and send it once more the
+            same way. Never put the summary, or the refused text, anywhere
+            else -- not in an inline comment, not through any other tool. If
+            it is still refused, stop; the workflow fails the job and logs
+            why.
 
             For added or changed README, CHANGELOG, docs and SKILL.md prose,
             also Read .writing-rubric.md (skip this if the file is missing)
@@ -1307,10 +1332,9 @@ jobs:
           # Comments cannot go inside claude_args; the action passes that
           # block through to the CLI verbatim.
           #
-          # --permission-mode default: a headless run names its own mode. Tag
-          # mode (track_progress) passes --permission-mode acceptEdits ahead of
-          # these args; this later flag wins, so the reviewer cannot edit the
-          # checkout, which the brief already forbids. It also sits above a
+          # --permission-mode default: a headless run names its own mode, so
+          # the reviewer cannot edit the checkout, which the brief already
+          # forbids, whatever mode the action would pick. It also sits above a
           # permissions.defaultMode in the seeded user-scope settings.json
           # (auto, for interactive sessions: mark-brannan/claude#349), which
           # `claude -p` reads. The step below proves which mode ran.
@@ -1323,7 +1347,8 @@ jobs:
       # Proof the guards were live, read from the session's own init message
       # rather than from what the install step claimed. Checked after the run
       # because the claude binary that loads plugins only exists once the
-      # action has installed it.
+      # action has installed it. A review that ran without them posted
+      # unscreened, so the job fails rather than warns (mark-brannan/.github#96).
       - if: inputs.seed-home && steps.review.outputs.execution_file != ''
         name: Verify the languette plugin loaded
         env:
@@ -1332,7 +1357,8 @@ jobs:
           if jq -e '[.[] | select(.type == "system" and .subtype == "init") | .plugins[]?.name] | index("languette")' "$EXEC" >/dev/null; then
             echo "languette plugin loaded; the review ran under its guards"
           else
-            echo "::warning::languette plugin did not load -- this review ran without its guards"
+            echo "::error::languette plugin did not load -- this review ran without its guards, so anything it posted went unscreened"
+            exit 1
           fi
 
       # Proof the mode flag took effect, from the same init message: the mode
@@ -1365,17 +1391,55 @@ jobs:
           pr: ${{ github.event.pull_request.number }}
           fields: '{"head_sha":"${{ github.event.pull_request.head.sha }}","tier":"${{ needs.triage.outputs.decision }}"}'
 
-      - name: Confirm a review comment actually landed
+      # The summary's one post path, checked (mark-brannan/.github#96): no
+      # summary from the bot fails the job, with each refusal of a `gh pr
+      # comment` call from the session as the reason. A refusal's own text can
+      # quote what it matched, and this log is public, so a line names the
+      # guard when it is guard-private-terms and otherwise says only that a
+      # reason was withheld; the call's input, which holds the body, is never
+      # printed. A refusal followed by a rewritten post that landed is a
+      # notice: the guard worked as designed.
+      - name: Confirm the summary landed through the guards
         id: posted
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           SINCE: ${{ needs.triage.outputs.since }}
+          EXEC: ${{ steps.review.outputs.execution_file }}
+          REFUSALS: |
+            ([.[] | select(.type == "assistant") | .message.content[]? | select(.type == "tool_use")
+              | {key: .id, value: {name, input}}] | from_entries) as $calls
+            | ( .[] | select(.type == "user") | .message.content[]?
+                | select(type == "object" and .type == "tool_result" and .is_error == true)
+                | ($calls[.tool_use_id] // {}) as $c
+                | select(($c.name // "") == "Bash" and (($c.input.command // "") | test("gh +pr +comment")))
+                | (.content | if type == "array" then map(.text? // "") | join(" ") else tostring end) as $why
+                | if ($why | test("private-terms|blocked term|private detail"; "i"))
+                  then "gh pr comment refused by guard-private-terms: the body held a term on its list (the term is withheld from this public log)"
+                  else "gh pr comment refused (reason withheld from this public log)" end ),
+              ( .[] | select(.type == "result") | .permission_denials[]?
+                | select(.tool_name == "Bash" and ((.tool_input.command // "") | test("gh +pr +comment")))
+                | "gh pr comment refused: it needed a permission nobody can grant in CI" )
         run: |
           n=$(gh api "repos/${{ github.repository }}/issues/$PR/comments" --paginate \
-                --jq "[.[] | select(.user.login == \"claude[bot]\" and .created_at >= \"$SINCE\")] | length")
+                --jq "[.[] | select(.user.login == \"claude[bot]\" and .created_at >= \"$SINCE\")] | length") \
+            || { echo "::error::could not list the pull request's comments, so whether the summary landed is unknown"; exit 1; }
+          refusals=""
+          if [ -n "$EXEC" ] && [ -f "$EXEC" ]; then
+            refusals=$(jq -r "$REFUSALS" "$EXEC" 2>/dev/null) || { refusals=""; echo "::warning::the session's execution file could not be read for refusals"; }
+          fi
           echo "posted=$([ "$n" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          [ "$n" -gt 0 ] || echo "::warning::no review comment posted; fingerprint not recorded"
+          if [ "$n" -gt 0 ]; then
+            [ -z "$refusals" ] || printf '%s\n' "$refusals" | sed 's/^/::notice::a refused post was rewritten and landed -- /'
+            exit 0
+          fi
+          if [ -n "$refusals" ]; then
+            printf '%s\n' "$refusals" | sed 's/^/::error::/'
+          else
+            echo "::error::the review posted no summary, and the session shows no refused gh pr comment call"
+          fi
+          echo "::error::no review summary posted; fingerprint not recorded, so the next push reviews again"
+          exit 1
 
       - if: always() && hashFiles('headless-run.jsonl') != ''
         uses: actions/upload-artifact@v7.0.2
@@ -2042,7 +2106,7 @@ jobs:
   # or fails the gate, goes back to the author in one signed comment with the
   # branch as it was. The merge is pushed as the App, signed, before the easy
   # fixes, which then land on the merged tree. That part runs behind any
-  # triage that passed, whether the review then ran, posted or was skipped;
+  # triage that passed, whether the review then ran, posted, failed or was skipped;
   # the fixes still need a review this run posted. A conflict that appears
   # later, when the base moves, waits for the next pull_request event.
   # With the `pr-number` input it need not wait: a caller started by
@@ -2050,7 +2114,7 @@ jobs:
   # handling runs on it (see the `target` step).
   fixer:
     needs: [triage, review]
-    if: always() && (inputs.pr-number != '' || (needs.triage.result == 'success' && (needs.review.result == 'success' || needs.review.result == 'skipped')))
+    if: always() && (inputs.pr-number != '' || (needs.triage.result == 'success' && needs.review.result != 'cancelled'))
     runs-on: ubuntu-latest
     timeout-minutes: 15  # stand-in until three runs are measured
     concurrency:
