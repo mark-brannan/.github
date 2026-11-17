@@ -90,7 +90,8 @@ ARGS = re.compile(r"^\s+claude_args: ")
 EFFORT = re.compile(r"--effort\s+([a-z]+)")
 CLASSES = re.compile(r"^\s+CLASSES: ((?:[a-z]+=\d+ ?)+)$")
 ACTION = re.compile(r"^##\[group\]Run anthropics/claude-code-action@")
-TRACK = re.compile(r"^\s+track_progress: true\s*$")
+# The review's own input echo: track_progress until .github#96 dropped it, display_report since.
+TRACK = re.compile(r"^\s+(?:track_progress: true|display_report: false)\s*$")
 FIXED = re.compile(r"\b(fixed|done|addressed|applied|resolved in|in [0-9a-f]{7,40})\b", re.I)
 DECLINED = re.compile(r"\b(no|not|won't|wontfix|disagree|by design|intended|intentional|keep(ing)?|kept|"
                       r"revers(al|ed)|out of scope|stays?)\b", re.I)
@@ -144,9 +145,9 @@ def review_lines(lines):
     """The review's own stretch of the job log. Each check is its own
     claude-code-action invocation, opened by a "Run anthropics/claude-code-action"
     group, with its own init, result and claude_args. The review is the one
-    whose inputs echo `track_progress: true`, wherever it runs; the review step
-    has echoed it since the shared workflow began. A log whose invocations
-    all lack it holds no review (the checks job, the fixer's), so none of it
+    whose inputs echo `display_report: false` (`track_progress: true` in a log
+    from before .github#96), wherever it runs; no other invocation sets either.
+    A log whose invocations all lack it holds no review (the checks job, the fixer's), so none of it
     is the review's. A log with no invocation group at all is read whole."""
     starts = [i for i, ln in enumerate(lines) if ACTION.match(ln)]
     for k, i in enumerate(starts):
