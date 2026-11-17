@@ -1422,10 +1422,11 @@ jobs:
                 | "gh pr comment refused: it needed a permission nobody can grant in CI" )
         run: |
           n=$(gh api "repos/${{ github.repository }}/issues/$PR/comments" --paginate \
-                --jq "[.[] | select(.user.login == \"claude[bot]\" and .created_at >= \"$SINCE\")] | length")
+                --jq "[.[] | select(.user.login == \"claude[bot]\" and .created_at >= \"$SINCE\")] | length") \
+            || { echo "::error::could not list the pull request's comments, so whether the summary landed is unknown"; exit 1; }
           refusals=""
           if [ -n "$EXEC" ] && [ -f "$EXEC" ]; then
-            refusals=$(jq -r "$REFUSALS" "$EXEC" 2>/dev/null) || refusals="(the session's execution file could not be read for refusals)"
+            refusals=$(jq -r "$REFUSALS" "$EXEC" 2>/dev/null) || { refusals=""; echo "::warning::the session's execution file could not be read for refusals"; }
           fi
           echo "posted=$([ "$n" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           if [ "$n" -gt 0 ]; then
