@@ -80,20 +80,6 @@ pull_request_rules:
       queue:
         name: default
 
-  - name: Label a pull request that conflicts with its base
-    # The conflict sweep (.github/workflows/conflict-sweep.yml) wakes on this
-    # label and hands the pull request to the fixer. Mergify reads
-    # mergeability itself, so a conflict that appears because main moved
-    # is labelled without anyone pushing to the branch. `toggle` takes the
-    # label off again once the conflict is gone or the PR closes.
-    conditions:
-      - conflict
-      - -closed
-    actions:
-      label:
-        toggle:
-          - Has Conflict
-
   - name: Remove fixup-hard from a pull request when it is green and every review thread is resolved
     # A PR a fixer session gave up on loses that mark once it is green
     # and thread-free. No-op in a repo without the label -- pr-label-audit

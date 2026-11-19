@@ -4,8 +4,7 @@
 # (.github/workflows/conflict-sweep.yml) leaves on each hand-over. A
 # measurement, never a gate.
 #
-# Per hand-over: label_delay, seconds from the push that caused the conflict
-# to Mergify's `Has Conflict` label; hand_delay, seconds from the label to the
+# Per hand-over: delay, seconds from the push that caused the conflict to the
 # hand-over. Only runs whose fix job ran are read, so a quiet sweep costs one
 # API call and a hand-over two.
 #
@@ -23,8 +22,7 @@ import sys
 
 NAME = "conflict_latency"
 TITLE = "conflict-latency"
-FIELDS = ["repo", "pr", "head", "event", "cause", "caused_at", "labelled_at", "handed_at",
-          "label_delay", "hand_delay", "run"]
+FIELDS = ["repo", "pr", "head", "event", "cause", "caused_at", "handed_at", "delay", "run"]
 
 
 def gh_json(*args):
@@ -39,13 +37,13 @@ def gh_json(*args):
 
 
 def parse_notice(message):
-    """`k=v k=v ...` as the sweep writes it; the delays become ints."""
+    """`k=v k=v ...` as the sweep writes it; the delay becomes an int. A notice
+    from the labelled sweep carries its delay in two parts."""
     rec = dict(kv.split("=", 1) for kv in message.split() if "=" in kv)
-    for k in ("label_delay", "hand_delay"):
-        try:
-            rec[k] = int(rec[k])
-        except (KeyError, ValueError):
-            return None
+    try:
+        rec["delay"] = int(rec["delay"]) if "delay" in rec else int(rec["label_delay"]) + int(rec["hand_delay"])
+    except (KeyError, ValueError):
+        return None
     return rec
 
 
@@ -97,16 +95,14 @@ def markdown(rows, since):
     out = ["### Conflict latency since %s" % since, ""]
     if not rows:
         return "\n".join(out + ["No hand-overs recorded.", ""])
-    out += ["| repo | hand-overs | label delay median | p90 | max | hand delay median | p90 |",
-            "|---|---|---|---|---|---|---|"]
+    out += ["| repo | hand-overs | delay median | p90 | max |",
+            "|---|---|---|---|---|"]
     by = {}
     for r in rows:
         by.setdefault(r["repo"], []).append(r)
     for repo, rs in sorted(by.items()) + [("**all**", rows)]:
-        ld = [r["label_delay"] for r in rs]
-        hd = [r["hand_delay"] for r in rs]
-        out.append("| %s | %d | %ds | %ds | %ds | %ds | %ds |" % (
-            repo, len(rs), statistics.median(ld), p90(ld), max(ld), statistics.median(hd), p90(hd)))
+        d = [r["delay"] for r in rs]
+        out.append("| %s | %d | %ds | %ds | %ds |" % (repo, len(rs), statistics.median(d), p90(d), max(d)))
     return "\n".join(out + [""])
 
 
