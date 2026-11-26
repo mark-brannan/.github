@@ -10,7 +10,9 @@ cl = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cl)
 
 NOTICE = ("pr=12 head=abc123 event=push cause=base caused_at=2026-11-11T10:00:00Z "
-          "labelled_at=2026-11-11T10:00:27Z handed_at=2026-11-11T10:00:36Z label_delay=27 hand_delay=9")
+          "handed_at=2026-11-11T10:00:36Z delay=36")
+LABELLED = ("pr=12 head=abc123 event=push cause=base caused_at=2026-11-11T10:00:00Z "
+            "labelled_at=2026-11-11T10:00:27Z handed_at=2026-11-11T10:00:36Z label_delay=27 hand_delay=9")
 RUN = {"id": 7, "html_url": "https://github.com/o/r/actions/runs/7"}
 
 
@@ -28,13 +30,17 @@ def fake_gh(jobs, notes):
 
 
 class Notice(unittest.TestCase):
-    def test_the_sweeps_notice_parses_with_int_delays(self):
+    def test_the_sweeps_notice_parses_with_an_int_delay(self):
         rec = cl.parse_notice(NOTICE)
-        self.assertEqual((rec["pr"], rec["cause"], rec["label_delay"], rec["hand_delay"]), ("12", "base", 27, 9))
+        self.assertEqual((rec["pr"], rec["cause"], rec["delay"]), ("12", "base", 36))
 
-    def test_a_notice_without_delays_is_dropped(self):
+    def test_a_labelled_sweeps_notice_sums_its_two_delays(self):
+        self.assertEqual(cl.parse_notice(LABELLED)["delay"], 36)
+
+    def test_a_notice_without_a_delay_is_dropped(self):
         self.assertIsNone(cl.parse_notice("pr=12 cause=base"))
-        self.assertIsNone(cl.parse_notice("pr=12 label_delay=soon hand_delay=9"))
+        self.assertIsNone(cl.parse_notice("pr=12 delay=soon"))
+        self.assertIsNone(cl.parse_notice("pr=12 label_delay=27"))
 
 
 class Rows(unittest.TestCase):
@@ -45,8 +51,8 @@ class Rows(unittest.TestCase):
         notes = [{"title": "conflict-latency", "message": NOTICE}, {"title": "other", "message": NOTICE}]
         with mock.patch.object(cl, "gh_json", fake_gh(jobs, notes)):
             rows = cl.rows_of("o/r", RUN)
-        self.assertEqual([(r["repo"], r["pr"], r["label_delay"], r["run"]) for r in rows],
-                         [("o/r", "12", 27, RUN["html_url"])])
+        self.assertEqual([(r["repo"], r["pr"], r["delay"], r["run"]) for r in rows],
+                         [("o/r", "12", 36, RUN["html_url"])])
 
     def test_a_run_whose_fix_was_skipped_reads_no_annotations(self):
         jobs = [self.sweep, {"id": 2, "name": "sweep / fix", "conclusion": "skipped"}]
